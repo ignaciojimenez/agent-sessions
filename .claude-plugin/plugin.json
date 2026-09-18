@@ -1,0 +1,5 @@
+{
+  "name": "agent-sessions",
+  "description": "Records each Claude Code session so `agent-restore` can reopen it after a reboot.",
+  "author": { "name": "Ignacio Jiménez Pi" }
+}

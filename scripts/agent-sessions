@@ -1,0 +1,302 @@
+#!/bin/bash
+#
+# agent-sessions — remember which agent CLI sessions are open, and reopen them
+# after a reboot the way they were laid out: one Ghostty window, a tab per
+# repo, a split per session.
+#
+#   agent-sessions track <tool>        hook entry point; reads the hook JSON on stdin
+#   agent-sessions list                every recorded session and its state
+#   agent-sessions restore [-n] [-y]   reopen the last batch of closed sessions
+#                                      -n: print the plan only   -y: don't ask
+#
+# `agent-restore` is the alias for `restore`. How it decides what to reopen,
+# and the evidence behind each rule: docs/agent-sessions.md.
+
+set -uo pipefail
+
+STATE_DIR="${AGENT_SESSIONS_STATE:-${XDG_STATE_HOME:-$HOME/.local/state}/agent-sessions}"
+# Sessions that ended within this many seconds of the most recent end are one
+# batch: what a reboot, or quitting the terminal, leaves behind.
+BATCH_WINDOW="${AGENT_SESSIONS_WINDOW:-300}"
+PRUNE_AFTER=$((14 * 86400))
+SEP=$'\x1f'
+
+die() { echo "agent-sessions: $*" >&2; exit 1; }
+now() { echo "${AGENT_SESSIONS_NOW:-$(date +%s)}"; }
+
+# ─── Agent adapters ──────────────────────────────────────────────────────────
+# Everything specific to one CLI lives here. Adding a CLI means wiring its
+# hooks to `agent-sessions track <tool>`, a track_<tool> that maps its hook
+# payload onto a record, and a case in each function below.
+
+resume_command() {  # <tool> <id>
+  case "$1" in
+    claude) printf 'claude --resume %s' "$2" ;;
+    *) return 1 ;;
+  esac
+}
+
+# Claude can only resume a session that has a transcript, and one killed
+# before its first exchange may never have written one.
+resumable() {  # <tool> <transcript>
+  case "$1" in
+    claude) [[ -f "$2" ]] ;;
+    *) return 0 ;;
+  esac
+}
+
+# A session can be renamed after it starts (/rename) and no hook fires when
+# it is. Claude appends a custom-title record to the transcript on every
+# rename, so the last one is the current name.
+current_name() {  # <tool> <transcript> <name recorded at start>
+  local latest=""
+  case "$1" in
+    claude)
+      [[ -f "$2" ]] && latest=$(grep -F '"type":"custom-title"' "$2" | tail -n 1 |
+                                jq -r '.customTitle // empty' 2>/dev/null)
+      ;;
+  esac
+  printf '%s' "${latest:-$3}"
+}
+
+# Claude Code SessionStart / SessionEnd payloads.
+track_claude() {
+  local fields event id reason cwd title transcript
+  fields=$(jq -r --arg s "$SEP" \
+    '[.hook_event_name, .session_id, .reason, .cwd, .session_title, .transcript_path]
+     | map(. // "") | join($s)') || die "unreadable hook payload"
+  IFS="$SEP" read -r event id reason cwd title transcript <<<"$fields"
+
+  case "$event" in
+    SessionStart)
+      # `claude --bg` sessions have no terminal, so there is nothing to reopen.
+      [[ -n "${TERM_PROGRAM:-}" ]] || return 0
+      record_start claude "$id" "$title" "$cwd" "$transcript"
+      ;;
+    SessionEnd)
+      case "$reason" in
+        # Closed on purpose: forget it. (clear and resume hand over to a new
+        # SessionStart, which records the session that replaces this one.)
+        prompt_input_exit|logout|clear|resume) record_forget claude "$id" ;;
+        # "other" is a closed terminal, Ctrl-C, a signal — and a reboot. They
+        # are indistinguishable here, so keep it and let restore decide.
+        *) record_end claude "$id" "$reason" ;;
+      esac
+      ;;
+  esac
+}
+
+# ─── Records ─────────────────────────────────────────────────────────────────
+# One JSON file per session, so concurrent hooks never contend for a file.
+
+# The id names a file and is typed into a shell by restore: allow nothing
+# that could traverse a path, start an option, or be interpreted by a shell.
+valid_id() { [[ "$1" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$ ]]; }
+record_file() { echo "$STATE_DIR/$1-$2.json"; }
+
+# The agent's own process, so restore can tell a live session from a dead one.
+# Claude runs hook commands as its direct children (measured, 2.1.277), so
+# only the parent qualifies; anything further up could be an unrelated agent.
+agent_pid() {  # <tool>
+  local comm
+  comm=$(ps -o comm= -p "$PPID" 2>/dev/null) && [[ "${comm##*/}" == "$1" ]] && echo "$PPID"
+  return 0
+}
+
+write_record() {  # <file> <json>
+  local tmp
+  mkdir -p "$STATE_DIR" && chmod 700 "$STATE_DIR"
+  tmp=$(mktemp "$STATE_DIR/.tmp.XXXXXX") || die "cannot write to $STATE_DIR"
+  printf '%s\n' "$2" >"$tmp" && mv "$tmp" "$1"
+}
+
+record_start() {  # <tool> <id> <name> <cwd> <transcript>
+  valid_id "$2" || die "refusing session id '$2'"
+  write_record "$(record_file "$1" "$2")" "$(jq -n \
+    --arg tool "$1" --arg id "$2" --arg name "$3" --arg cwd "$4" \
+    --arg transcript "$5" --arg term "${TERM_PROGRAM:-}" \
+    --arg pid "$(agent_pid "$1")" --argjson now "$(now)" \
+    '{tool: $tool, id: $id, name: $name, cwd: $cwd, transcript: $transcript,
+      term: $term, pid: ($pid | tonumber? // null), started_at: $now}')"
+}
+
+record_end() {  # <tool> <id> <reason>
+  local file
+  valid_id "$2" || return 0
+  file=$(record_file "$1" "$2")
+  [[ -f "$file" ]] || return 0
+  write_record "$file" "$(jq --arg reason "$3" --argjson now "$(now)" \
+    '.ended_at = $now | .end_reason = $reason' "$file")"
+}
+
+record_forget() {  # <tool> <id>
+  valid_id "$2" && rm -f "$(record_file "$1" "$2")"
+}
+
+running() {  # <tool> <pid>
+  [[ -n "$2" ]] || return 1
+  local comm
+  comm=$(ps -o comm= -p "$2" 2>/dev/null) && [[ "${comm##*/}" == "$1" ]]
+}
+
+# Emits one line per record, fields joined by $SEP:
+#   state tool id name cwd transcript started ended
+# where state is running, closed (ended), or lost (never ended, not running:
+# killed before its hook could run). Prunes records past PRUNE_AFTER.
+load_records() {
+  local files=() f lines tool id name cwd transcript pid started ended state
+  for f in "$STATE_DIR"/*.json; do [[ -f "$f" ]] && files+=("$f"); done
+  [[ ${#files[@]} -gt 0 ]] || return 0
+  lines=$(jq -r --arg s "$SEP" \
+    '[.tool, .id, .name, .cwd, .transcript, .pid, .started_at, .ended_at]
+     | map(. // "" | tostring) | join($s)' "${files[@]}") ||
+    die "unreadable record in $STATE_DIR"
+  while IFS="$SEP" read -r tool id name cwd transcript pid started ended; do
+    if [[ $(( $(now) - ${ended:-$started} )) -gt $PRUNE_AFTER ]]; then
+      record_forget "$tool" "$id"; continue
+    fi
+    if [[ -n "$ended" ]]; then state=closed
+    elif running "$tool" "$pid"; then state=running
+    else state=lost
+    fi
+    printf '%s\n' "$state$SEP$tool$SEP$id$SEP$name$SEP$cwd$SEP$transcript$SEP$started$SEP$ended"
+  done <<<"$lines"
+}
+
+# ─── Commands ────────────────────────────────────────────────────────────────
+
+cmd_list() {
+  local state tool id name cwd transcript started ended
+  printf '%-8s %-7s %-36s %s\n' STATE TOOL NAME DIRECTORY
+  load_records | sort -t "$SEP" -k7,7nr |
+  while IFS="$SEP" read -r state tool id name cwd transcript started ended; do
+    name=$(current_name "$tool" "$transcript" "$name")
+    printf '%-8s %-7s %-36s %s\n' "$state" "$tool" "${name:-(unnamed)}" "${cwd/#$HOME/~}"
+  done
+}
+
+# The sessions to reopen: every lost one, plus the closed ones that ended in
+# the same batch as the most recent close. Running sessions are never
+# touched, so running restore twice does not duplicate anything.
+select_batch() {
+  local records last=0 state tool id name cwd transcript started ended
+  records=$(load_records)
+  [[ -n "$records" ]] || return 0
+  while IFS="$SEP" read -r state tool id name cwd transcript started ended; do
+    [[ "$state" == closed && "$ended" -gt "$last" ]] && last=$ended
+  done <<<"$records"
+  while IFS="$SEP" read -r state tool id name cwd transcript started ended; do
+    case "$state" in
+      lost) ;;
+      closed) [[ "$ended" -ge $((last - BATCH_WINDOW)) ]] || continue ;;
+      *) continue ;;
+    esac
+    printf '%s\n' "$tool$SEP$id$SEP$name$SEP$cwd$SEP$transcript$SEP$started"
+  done <<<"$records"
+}
+
+cmd_restore() {
+  local dry_run=0 assume_yes=0 opt
+  while getopts "ny" opt; do
+    case "$opt" in
+      n) dry_run=1 ;;
+      y) assume_yes=1 ;;
+      *) die "usage: agent-sessions restore [-n] [-y]" ;;
+    esac
+  done
+
+  # Resolve names and group by repo: lines of  repo started name cwd command
+  local plan="" skipped=() tool id name cwd transcript started repo cmd
+  while IFS="$SEP" read -r tool id name cwd transcript started; do
+    [[ -n "$tool" ]] || continue
+    name=$(current_name "$tool" "$transcript" "$name")
+    if [[ -z "$name" ]]; then skipped+=("unnamed session in ${cwd/#$HOME/~}"); continue; fi
+    if [[ ! -d "$cwd" ]]; then skipped+=("$name: ${cwd/#$HOME/~} no longer exists"); continue; fi
+    if ! resumable "$tool" "$transcript"; then skipped+=("$name: nothing to resume (no transcript)"); continue; fi
+    if ! cmd=$(resume_command "$tool" "$id"); then skipped+=("$name: no resume command for $tool"); continue; fi
+    repo=$(git -C "$cwd" rev-parse --show-toplevel 2>/dev/null) || repo=$cwd
+    plan+="$repo$SEP$started$SEP$name$SEP$cwd$SEP$cmd"$'\n'
+  done < <(select_batch)
+  plan=$(printf '%s' "$plan" | sort -t "$SEP" -k1,1 -k2,2n)
+
+  local s
+  for s in ${skipped[@]+"${skipped[@]}"}; do echo "skipping $s"; done
+  if [[ -z "$plan" ]]; then echo "Nothing to reopen."; return 0; fi
+
+  local current="" sessions=0 tabs=0 args=()
+  echo
+  while IFS="$SEP" read -r repo started name cwd cmd; do
+    if [[ "$repo" != "$current" ]]; then
+      current=$repo; tabs=$((tabs + 1)); args+=(--tab)
+      printf '  %s  %s\n' "${repo##*/}" "${repo/#$HOME/~}"
+    fi
+    sessions=$((sessions + 1)); args+=("$cwd" "$cmd")
+    printf '      %s\n' "$name"
+  done <<<"$plan"
+  echo
+  echo "$sessions session(s) in $tabs tab(s)."
+
+  [[ "$dry_run" -eq 1 ]] && return 0
+  if [[ "$assume_yes" -eq 0 ]]; then
+    local answer
+    read -r -p "Reopen? [y/N] " answer
+    [[ "$answer" =~ ^[Yy]$ ]] || return 0
+  fi
+  open_ghostty "${args[@]}"
+}
+
+# ─── Terminal adapter: Ghostty (macOS, AppleScript) ──────────────────────────
+# Ghostty's `+new-window` CLI action is unsupported on macOS; AppleScript is
+# its only scripting surface there. Arguments: --tab starts a tab, then
+# directory/command pairs, each opening a split in that tab. The directory
+# is set as a surface property and only the command is typed into the shell.
+open_ghostty() {
+  [[ "$(uname -s)" == Darwin ]] || die "reopening windows needs macOS + Ghostty"
+  osascript - "$@" >/dev/null <<'APPLESCRIPT' || die "Ghostty refused the layout (see above)"
+on run argv
+  tell application "Ghostty"
+    set win to missing value
+    set pane to missing value
+    set startTab to false
+    set i to 1
+    repeat while i ≤ (count of argv)
+      if item i of argv is "--tab" then
+        if pane is not missing value then perform action "equalize_splits" on pane
+        set startTab to true
+        set i to i + 1
+      else
+        set cfg to new surface configuration
+        set initial working directory of cfg to item i of argv
+        set initial input of cfg to (item (i + 1) of argv) & linefeed
+        if win is missing value then
+          set win to new window with configuration cfg
+          set pane to focused terminal of selected tab of win
+        else if startTab then
+          set pane to focused terminal of (new tab in win with configuration cfg)
+        else
+          set pane to split pane direction right with configuration cfg
+        end if
+        set startTab to false
+        set i to i + 2
+      end if
+    end repeat
+    if pane is not missing value then perform action "equalize_splits" on pane
+  end tell
+end run
+APPLESCRIPT
+}
+
+# ─── Main ────────────────────────────────────────────────────────────────────
+
+command -v jq >/dev/null || die "jq is required (brew install jq)"
+
+case "${1:-}" in
+  track)
+    [[ $# -eq 2 ]] || die "usage: agent-sessions track <tool>"
+    declare -F "track_$2" >/dev/null || die "no adapter for '$2'"
+    "track_$2"
+    ;;
+  list) cmd_list ;;
+  restore) shift; cmd_restore "$@" ;;
+  *) sed -n '3,13s/^# \{0,1\}//p' "$0"; exit 1 ;;
+esac
