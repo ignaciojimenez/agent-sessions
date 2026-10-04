@@ -116,7 +116,10 @@ terminal, and how each is handled:
 `tests/contract.sh` loads the compiled script and runs its restore command
 through `do shell script`, with the baked values: the part that breaks when
 an app's environment differs from a terminal's. The dialogs and Ghostty's
-permission prompt need a person.
+permission prompt need a person: the author ran it from Spotlight on
+2026-10-04 — plan dialog, one permission prompt, one Ghostty window with a
+tab per session. Ghostty was already running; a cold start from the app is
+untested.
 
 ## Security
 
