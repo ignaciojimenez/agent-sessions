@@ -169,7 +169,9 @@ if command -v tmux >/dev/null; then
   # with the stub first on an explicit PATH: neither a login profile nor
   # tmux's environment handling can put the real agent in front of it.
   mkdir -p "$T/stub" && printf '#!/bin/sh\necho "agent $* in $PWD"\n' >"$T/stub/claude" && chmod +x "$T/stub/claude"
-  echo "set -g default-command \"exec env PATH='$T/stub:/usr/bin:/bin' /bin/sh\"" >"$TM/tmux.conf"
+  # Wide panes, so the long temp paths they print are not wrapped off screen.
+  printf '%s\n' "set -g default-command \"exec env PATH='$T/stub:/usr/bin:/bin' /bin/sh\"" \
+    'set -g default-size 400x50' >"$TM/tmux.conf"
   tmux_ -f "$TM/tmux.conf" new-session -d -s keepalive
   tmux_restore() { TMUX_TMPDIR="$TM" AGENT_SESSIONS_NOW=9200 "$BIN" restore -y -t tmux; }
   out=$(tmux_restore)
@@ -180,7 +182,7 @@ if command -v tmux >/dev/null; then
     has "$(tmux_ list-panes -s -t =agent-sessions -F '#{pane_current_path}')" "$T/repo/sub"
   ran=""
   for _ in 1 2 3 4 5 6 7 8 9 10; do
-    ran=$(for p in $(tmux_ list-panes -s -t =agent-sessions -F '#{pane_id}'); do tmux_ capture-pane -p -J -t "$p"; done)
+    ran=$(for p in $(tmux_ list-panes -s -t =agent-sessions -F '#{pane_id}'); do tmux_ capture-pane -p -J -S - -t "$p"; done)
     [[ $(grep -c '^agent --resume' <<<"$ran") -ge 6 ]] && break
     sleep 0.5
   done
