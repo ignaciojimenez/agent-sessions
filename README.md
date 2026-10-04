@@ -1,7 +1,7 @@
 # agent-sessions
 
-Reopen the Claude Code sessions a reboot closed, laid out the way you worked
-them: one Ghostty window, a tab per repo, a split per session.
+Reopen the coding-agent sessions a reboot closed, laid out the way you left
+them: a tab per repository, a split per session.
 
 ```
 $ agent-restore
@@ -12,18 +12,36 @@ $ agent-restore
   infra  ~/src/infra
       dns-migration
 
-3 session(s) in 2 tab(s).
+3 session(s) in 2 tab(s), via ghostty.
 Reopen? [y/N]
 ```
 
-Claude Code hooks keep a small record of every session in a terminal. After
-a reboot, `agent-restore` reopens the ones that were still open — and leaves
-alone the ones you closed on purpose with `/exit`.
+The agent CLI's session hooks keep a small record of each interactive
+session: its id, name and directory. After a reboot, `agent-restore` reopens
+the sessions that were still open, and leaves out the ones you closed on
+purpose. Records never hold conversation content.
+
+## Supported
+
+Both sides are adapters, so another agent CLI or terminal is one function
+away ([extending](docs/design.md#extending)).
+
+| Agent CLI | |
+|---|---|
+| Claude Code | sessions recorded by its `SessionStart`/`SessionEnd` hooks, resumed by id |
+
+| Terminal | Layout | Platforms |
+|---|---|---|
+| Ghostty | native window, tabs and splits | macOS |
+| tmux | a window per repo, a pane per session, in any terminal emulator | macOS, Linux |
+| print | the commands to run, for any other terminal | any |
 
 ## Requirements
 
-macOS, [Ghostty](https://ghostty.org), `jq`, and an agent CLI with an
-adapter: today, Claude Code.
+`bash`, `jq` and `git`, a supported agent CLI, and Ghostty or tmux for
+anything beyond printing the commands. A session is recorded when it runs
+in a terminal that sets `TERM_PROGRAM`, as Ghostty and tmux do; on Linux,
+run agents inside tmux.
 
 ## Install
 
@@ -32,43 +50,51 @@ git clone https://github.com/ignaciojimenez/agent-sessions.git
 cd agent-sessions && ./install.sh
 ```
 
-`install.sh` links the script into `~/.local/bin` as `agent-sessions` and
-`agent-restore`, wires an adapter for each agent CLI it finds, and on macOS
-builds `~/Applications/Agent Restore.app`. Every link
-points into the clone, so `git pull` updates it; `./install.sh --uninstall`
-removes them. Start agent sessions afresh afterwards: hooks load at startup.
+`install.sh` links the tool into `~/.local/bin` as `agent-sessions` and
+`agent-restore`, wires the adapter of each agent CLI it finds, and on macOS
+builds the **Agent Restore** app. Every link points into the clone, so
+`git pull` updates it, and `./install.sh --uninstall` removes it all.
+Restart running agent sessions afterwards so they load the hooks.
 
 ## Use
 
-Name sessions as you start them (`claude -n <name>`, or `/rename` later) so
-the plan reads well; unnamed sessions you worked in come back too.
-
 ```bash
-agent-restore             # after a reboot: show the plan, ask, reopen
-agent-restore -n          # plan only
-agent-restore -y          # no prompt
-agent-sessions list       # every recorded session: running, closed or lost
+agent-restore                 # after a reboot: show the plan, ask, reopen
+agent-restore -n              # show the plan only
+agent-restore -y              # reopen without asking
+agent-restore -t tmux         # choose the terminal: ghostty, tmux or print
+agent-sessions list           # every recorded session: running, closed or lost
 ```
 
-Or skip the terminal: open **Agent Restore** from Spotlight. It shows the
-same plan in a dialog and reopens on **Reopen**; Ghostty need not be running.
-The first time, macOS asks to let it control Ghostty.
+The terminal is detected: tmux when run inside tmux, Ghostty when run in
+Ghostty on macOS, otherwise `print`. Set `AGENT_SESSIONS_TERMINAL` to change
+the default.
 
-Records live in `~/.local/state/agent-sessions/` (`0700`) and hold paths and
-session names only, never conversation content. They are pruned after 14 days.
+Named sessions make the plan easier to read (in Claude Code: `claude -n
+<name>`, or `/rename`); unnamed ones you worked in are reopened too.
+
+On macOS, **Agent Restore** in Spotlight shows the same plan in a dialog and
+reopens in Ghostty. The first run asks for permission to control Ghostty.
+
+Records live in `~/.local/state/agent-sessions/` (mode `0700`) and are
+pruned after 14 days.
 
 ## Docs
 
-- [`docs/design.md`](docs/design.md) — what gets reopened and why, the
-  measured hook behaviour behind each rule, security, adding another CLI
-- [`docs/decisions.md`](docs/decisions.md) — architecture calls, newest first
+- [Design](docs/design.md): what gets reopened and why, the adapters,
+  what was verified, security
+- [Decisions](docs/decisions.md): architecture decisions, newest first
 
 ## Layout
 
 ```
-agent-sessions        the tool: records sessions, plans and reopens them
-adapters/<cli>/       how one agent CLI reports its sessions to it
-macos/                the Spotlight app's source, compiled by install.sh
-install.sh            links the tool onto PATH, wires the adapters, builds the app
-tests/contract.sh     replays real hook payloads; also tests install.sh
+agent-sessions       the tool: records sessions, plans and reopens them
+adapters/<agent>/    hook wiring for one agent CLI
+macos/               source of the Spotlight app, compiled by install.sh
+install.sh           installs the tool, the adapters and the app
+tests/contract.sh    contract tests: real hook payloads, terminals, install
 ```
+
+## License
+
+[MIT](LICENSE)

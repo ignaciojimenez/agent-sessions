@@ -1,21 +1,25 @@
 #!/bin/bash
 #
-# Contract test for agent-sessions and install.sh.
+# Contract test for agent-sessions, its terminal adapters, and install.sh.
 #
 # Replays hook payloads shaped exactly like the ones Claude Code 2.1.27x sends
 # (captured live — see docs/design.md) into a throwaway state dir,
 # with a fixed clock, then asserts on the records and on the restore plan.
-# No terminal, no network, no real sessions; runs on macOS and Linux.
+# No network, no real sessions; tmux runs on a private server. Runs on macOS
+# and Linux.
 
 set -uo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
 BIN="${AGENT_SESSIONS_BIN:-$ROOT/agent-sessions}"
 T="$(mktemp -d -t agent-sessions-test.XXXXXX)"
+# tmux's socket path must fit a sockaddr (104 bytes on macOS); $TMPDIR may not.
+TM="$(mktemp -d /tmp/as-tmux.XXXXXX)"
 FAKE_PID=""
-trap '[[ -n "$FAKE_PID" ]] && kill "$FAKE_PID" 2>/dev/null; rm -rf "$T"' EXIT
+trap '[[ -n "$FAKE_PID" ]] && kill "$FAKE_PID" 2>/dev/null; tmux_ kill-server 2>/dev/null; rm -rf "$T" "$TM"' EXIT
 
 export AGENT_SESSIONS_STATE="$T/state" TERM_PROGRAM=test CLAUDE_CODE_ENTRYPOINT=cli
+unset TMUX AGENT_SESSIONS_TERMINAL
 PASS=0 FAIL=0
 check() {  # <description> <command...>
   local desc=$1; shift
@@ -24,6 +28,7 @@ check() {  # <description> <command...>
 has()    { grep -qF -- "$2" <<<"$1"; }
 hasnt()  { ! grep -qF -- "$2" <<<"$1"; }
 record() { [[ -f "$AGENT_SESSIONS_STATE/claude-$1.json" ]]; }
+tmux_()  { TMUX_TMPDIR="$TM" tmux "$@"; }  # a private tmux server
 
 mkdir -p "$T/repo/sub" "$T/repo2" "$T/transcripts"
 git -C "$T/repo" init -q && git -C "$T/repo2" init -q
@@ -130,13 +135,64 @@ check "plan includes the last batch" has "$plan" "zeta"
 check "plan includes lost sessions" has "$plan" "delta"
 check "plan groups a subdirectory under its repo" \
   test "$(grep -A4 "  repo  " <<<"$plan" | grep -c beta)" = 1
-check "plan opens one tab per repo" has "$plan" "6 session(s) in 2 tab(s)."
+check "plan opens one tab per repo" has "$plan" "6 session(s) in 2 tab(s),"
 check "plan leaves running sessions alone" hasnt "$plan" "epsilon"
 check "plan leaves out sessions closed before the batch" hasnt "$plan" "      old"
 check "plan reopens an unnamed session that was worked in" has "$plan" "(unnamed bbbbbbbb)"
 check "plan skips an unnamed session nothing happened in" \
   has "$plan" "skipping unnamed session in $T/repo: nothing in it"
 check "plan reports sessions with nothing to resume" has "$plan" "theta: nothing to resume"
+
+# Terminal adapters: which one is picked, and what each opens.
+via() { AGENT_SESSIONS_NOW=9200 "$@" "$BIN" restore -n | tail -n 1; }
+if [[ "$(uname -s)" == Darwin ]]; then
+  check "in Ghostty on macOS, restore uses Ghostty" \
+    test "$(via env TERM_PROGRAM=ghostty)" = "6 session(s) in 2 tab(s), via ghostty."
+fi
+check "inside tmux, restore uses tmux" test "$(via env TMUX=/tmp/x,1,0)" = "6 session(s) in 2 tab(s), via tmux."
+check "in any other terminal, restore prints" test "$(via env TERM_PROGRAM=Apple_Terminal)" = "6 session(s) in 2 tab(s), via print."
+check "AGENT_SESSIONS_TERMINAL picks the terminal" test "$(via env AGENT_SESSIONS_TERMINAL=tmux)" = "6 session(s) in 2 tab(s), via tmux."
+check "-t overrides it" \
+  test "$(AGENT_SESSIONS_TERMINAL=tmux AGENT_SESSIONS_NOW=9200 "$BIN" restore -n -t print | tail -n 1)" = "6 session(s) in 2 tab(s), via print."
+check "an unknown terminal is refused" eval '! "$BIN" restore -n -t bogus 2>/dev/null'
+
+printed=$(AGENT_SESSIONS_NOW=9200 "$BIN" restore -t print)
+check "print lists each tab" has "$printed" "# repo2"
+check "print gives a command per session" has "$printed" "cd $T/repo && claude --resume aaaaaaaa-0002"
+
+# tmux, on a private server: the windows, panes and directories it opened,
+# and the command typed into each pane. CI installs tmux; locally it is
+# skipped, loudly, if missing.
+if command -v tmux >/dev/null; then
+  # A stub agent first on PATH, so the panes never start a real one. The
+  # server is started here, without the user's config, running a non-login
+  # shell: a login shell would rebuild PATH and find the real agent.
+  mkdir -p "$T/stub" && printf '#!/bin/sh\necho "agent $* in $PWD"\n' >"$T/stub/claude" && chmod +x "$T/stub/claude"
+  echo 'set -g default-command "exec /bin/sh"' >"$TM/tmux.conf"
+  tmux_ -f "$TM/tmux.conf" new-session -d -s keepalive
+  tmux_restore() { PATH="$T/stub:$PATH" TMUX_TMPDIR="$TM" AGENT_SESSIONS_NOW=9200 "$BIN" restore -y -t tmux; }
+  out=$(tmux_restore)
+  check "tmux opens a session to attach to" has "$out" "tmux attach -t agent-sessions"
+  check "tmux opens a window per repo, a pane per session" \
+    test "$(tmux_ list-windows -t =agent-sessions -F '#{window_name} #{window_panes}' | tr '\n' ' ')" = "repo 4 repo2 2 "
+  check "tmux starts each pane in its session's directory" \
+    has "$(tmux_ list-panes -s -t =agent-sessions -F '#{pane_current_path}')" "$T/repo/sub"
+  ran=""
+  for _ in 1 2 3 4 5 6 7 8 9 10; do
+    ran=$(for p in $(tmux_ list-panes -s -t =agent-sessions -F '#{pane_id}'); do tmux_ capture-pane -p -J -t "$p"; done)
+    [[ $(grep -c '^agent --resume' <<<"$ran") -ge 6 ]] && break
+    sleep 0.5
+  done
+  check "tmux runs every resume command, each in its own directory" \
+    test "$(grep -c '^agent --resume' <<<"$ran")" = 6
+  check "tmux resumes the session in its subdirectory" has "$ran" "agent --resume aaaaaaaa-0005 in $T/repo/sub"
+  out=$(tmux_restore)
+  check "a second restore never reuses the session" has "$out" "tmux attach -t agent-sessions-9200"
+elif [[ -n "${CI:-}" ]]; then
+  check "tmux is installed in CI" false
+else
+  echo "  - tmux not installed: tmux adapter not tested"
+fi
 
 # Install, into a throwaway HOME: the links, the hook command exactly as the
 # Claude adapter spells it (a wrong path there records nothing, silently, in

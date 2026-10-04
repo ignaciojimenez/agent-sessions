@@ -2,6 +2,12 @@
 
 One-liners, newest first. The reasoning for each lives in `design.md`.
 
+- **2026-10-04 — Terminals are adapters too, and tmux is the portable one.**
+  Ghostty keeps its native layout; tmux covers Linux and every terminal
+  without an adapter; `print` is the fallback. Detection picks only the
+  terminal it is running in, never a GUI it would have to guess at. No
+  native iTerm2 or Terminal.app adapter: Terminal.app cannot script tabs or
+  splits, and iTerm2 could not be tested.
 - **2026-10-04 — Spotlight gets an AppleScript app, built on install.** Spotlight
   launches apps, not commands. `osacompile` ships with macOS and needs no
   signing identity; a Shortcuts shortcut would need its UI to create.
