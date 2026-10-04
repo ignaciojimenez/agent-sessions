@@ -85,15 +85,16 @@ by the author on 2026-10-04, on the version extracted here). The design does
 not depend on whether the hook gets to run at shutdown: a record that never
 ended is reopened as lost.
 
-Packaged as a marketplace plugin (2026-10-04, Claude Code 2.1.289), installed
-from GitHub: the hook runs from the cached copy via `${CLAUDE_PLUGIN_ROOT}`
+Installed by `install.sh` (2026-10-04, Claude Code 2.1.289): the adapter
+loads from `~/.claude/skills/`, its hook runs `~/.local/bin/agent-sessions`
 and records an interactive session (a hang-up ends it as `other`), a
-headless one is never recorded, and the script run as `agent-restore` plans
-from the same records.
+headless one is never recorded, and `agent-restore` on PATH plans from the
+same records.
 
 `tests/contract.sh` replays those payload shapes against a fixed clock. It
-also runs the hook command exactly as `hooks/hooks.json` spells it, so a
-wrong plugin path fails the test rather than silently recording nothing.
+also runs `install.sh` into a throwaway `HOME` and then the hook command
+exactly as the Claude adapter spells it, so a wrong path fails the test
+rather than silently recording nothing.
 
 ## Security
 
@@ -106,9 +107,11 @@ wrong plugin path fails the test rather than silently recording nothing.
 ## Extending
 
 Everything tool-specific sits in the adapter block at the top of
-`scripts/agent-sessions`: `track_<tool>`, `resume_command`, `resumable`,
-`worked_in`, `current_name`. A new CLI needs those plus its hooks wired to
-`agent-sessions track <tool>`, as `hooks/hooks.json` does for Claude.
+`agent-sessions`: `track_<tool>`, `resume_command`, `resumable`,
+`worked_in`, `current_name`. A new CLI needs those, plus an
+`adapters/<tool>/` folder that makes its hooks run
+`~/.local/bin/agent-sessions track <tool>`, and a line in `install.sh` that
+wires it where that CLI lives.
 Gemini CLI 0.18.4 has hook code but resumes only by index or `latest`, not
 by id, so it cannot be restored this way yet.
 

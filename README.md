@@ -22,18 +22,20 @@ alone the ones you closed on purpose with `/exit`.
 
 ## Requirements
 
-macOS, [Ghostty](https://ghostty.org), Claude Code, `jq`.
+macOS, [Ghostty](https://ghostty.org), `jq`, and an agent CLI with an
+adapter: today, Claude Code.
 
 ## Install
 
 ```bash
-# The hooks that record sessions
-claude plugin marketplace add ignaciojimenez/agent-sessions
-claude plugin install agent-sessions@agent-sessions
-
-# The command that reopens them (installs jq too)
-brew install ignaciojimenez/tap/agent-sessions
+git clone https://github.com/ignaciojimenez/agent-sessions.git
+cd agent-sessions && ./install.sh
 ```
+
+`install.sh` links the script into `~/.local/bin` as `agent-sessions` and
+`agent-restore`, and wires an adapter for each agent CLI it finds. Every link
+points into the clone, so `git pull` updates it; `./install.sh --uninstall`
+removes them. Start agent sessions afresh afterwards: hooks load at startup.
 
 ## Use
 
@@ -56,4 +58,11 @@ session names only, never conversation content. They are pruned after 14 days.
   measured hook behaviour behind each rule, security, adding another CLI
 - [`docs/decisions.md`](docs/decisions.md) — architecture calls, newest first
 
-Tests: `tests/contract.sh`.
+## Layout
+
+```
+agent-sessions        the tool: records sessions, plans and reopens them
+adapters/<cli>/       how one agent CLI reports its sessions to it
+install.sh            links the tool onto PATH and wires the adapters
+tests/contract.sh     replays real hook payloads; also tests install.sh
+```

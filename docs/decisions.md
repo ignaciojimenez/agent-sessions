@@ -2,12 +2,14 @@
 
 One-liners, newest first. The reasoning for each lives in `design.md`.
 
-- **2026-10-04 — Two install channels, one tag.** Claude Code runs the hook
-  from the plugin's own copy (`${CLAUDE_PLUGIN_ROOT}`), because that path is
-  the only one guaranteed to exist where hooks run. The shell needs a command
-  on `PATH`, which a plugin cannot provide outside Claude's Bash tool, so
-  Homebrew ships the same script from the same tag. The record format is the
-  contract between the two copies; keep it backward compatible.
+- **2026-10-04 — The tool is the centre; each agent CLI is an adapter.** The
+  script sits at the root and is installed by `git clone` + `install.sh`,
+  which links it into `~/.local/bin` and wires `adapters/<cli>/` for the CLIs
+  present. Adapters call that fixed path, so there is one copy and `git pull`
+  updates it. Tried first and dropped the same day: shipping the repo as a
+  Claude Code marketplace plugin plus a Homebrew formula. It made the whole
+  repo a Claude plugin, and a release tag and formula are machinery a single
+  bash script does not need.
 - **2026-10-04 — `agent-restore` is the script under a second name**, not a
   shell alias, so it works without anyone's dotfiles.
 - **2026-10-04 — Extracted from

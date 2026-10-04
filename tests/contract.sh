@@ -1,6 +1,6 @@
 #!/bin/bash
 #
-# Contract test for scripts/agent-sessions.
+# Contract test for agent-sessions and install.sh.
 #
 # Replays hook payloads shaped exactly like the ones Claude Code 2.1.27x sends
 # (captured live — see docs/design.md) into a throwaway state dir,
@@ -10,7 +10,7 @@
 set -uo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
-BIN="${AGENT_SESSIONS_BIN:-$ROOT/scripts/agent-sessions}"
+BIN="${AGENT_SESSIONS_BIN:-$ROOT/agent-sessions}"
 T="$(mktemp -d -t agent-sessions-test.XXXXXX)"
 FAKE_PID=""
 trap '[[ -n "$FAKE_PID" ]] && kill "$FAKE_PID" 2>/dev/null; rm -rf "$T"' EXIT
@@ -138,24 +138,36 @@ check "plan skips an unnamed session nothing happened in" \
   has "$plan" "skipping unnamed session in $T/repo: nothing in it"
 check "plan reports sessions with nothing to resume" has "$plan" "theta: nothing to resume"
 
-# Packaging. The hook command exactly as hooks/hooks.json spells it, run
-# through a shell with the plugin root Claude Code exports to hooks: a wrong
-# path there records nothing, silently, in every session.
-hook=$(jq -r '.hooks.SessionStart[0].hooks[0].command' "$ROOT/hooks/hooks.json")
+# Install, into a throwaway HOME: the links, the hook command exactly as the
+# Claude adapter spells it (a wrong path there records nothing, silently, in
+# every session), agent-restore, and uninstall.
+H="$T/home"; mkdir -p "$H/.claude"
+HOME="$H" "$ROOT/install.sh" >/dev/null
+check "install links agent-sessions" test "$(readlink "$H/.local/bin/agent-sessions")" = "$ROOT/agent-sessions"
+check "install links agent-restore" test "$(readlink "$H/.local/bin/agent-restore")" = "$ROOT/agent-sessions"
+check "install wires the Claude adapter" \
+  test "$(readlink "$H/.claude/skills/agent-sessions")" = "$ROOT/adapters/claude"
+hooks="$ROOT/adapters/claude/hooks/hooks.json"
+hook=$(jq -r '.hooks.SessionStart[0].hooks[0].command' "$hooks")
 check "SessionStart and SessionEnd run the same command" \
-  test "$hook" = "$(jq -r '.hooks.SessionEnd[0].hooks[0].command' "$ROOT/hooks/hooks.json")"
+  test "$hook" = "$(jq -r '.hooks.SessionEnd[0].hooks[0].command' "$hooks")"
 jq -n --arg tp "$T/transcripts/cccccccc-0001.jsonl" --arg cwd "$T/repo" \
   '{session_id: "cccccccc-0001", transcript_path: $tp, cwd: $cwd,
     hook_event_name: "SessionStart", source: "startup", session_title: "hooked"}' |
-  AGENT_SESSIONS_NOW=9300 CLAUDE_PLUGIN_ROOT="$ROOT" sh -c "$hook"
-check "the plugin's hook command records a session" record cccccccc-0001
-
-# Installed as agent-restore (the Homebrew formula's second name), it restores.
-ln -s "$BIN" "$T/bin/agent-restore"
-plan=$(AGENT_SESSIONS_NOW=9400 "$T/bin/agent-restore" -n)
+  HOME="$H" AGENT_SESSIONS_NOW=9300 sh -c "$hook"
+check "the Claude adapter's hook command records a session" record cccccccc-0001
+plan=$(AGENT_SESSIONS_NOW=9400 "$H/.local/bin/agent-restore" -n)
 check "agent-restore prints a plan" has "$plan" "session(s) in"
-check "agent-restore is restore" \
-  test "$plan" = "$(AGENT_SESSIONS_NOW=9400 "$BIN" restore -n)"
+check "agent-restore is restore" test "$plan" = "$(AGENT_SESSIONS_NOW=9400 "$BIN" restore -n)"
+
+# A real file where a link goes is never replaced, and the install says so.
+H2="$T/home2"; mkdir -p "$H2/.local/bin"; echo keep >"$H2/.local/bin/agent-restore"
+check "install refuses to replace a file" eval '! HOME="$H2" "$ROOT/install.sh" >/dev/null'
+check "the file is left as it was" test "$(cat "$H2/.local/bin/agent-restore")" = keep
+
+HOME="$H" "$ROOT/install.sh" --uninstall >/dev/null
+check "uninstall removes every link" \
+  test -z "$(find "$H/.local/bin" "$H/.claude/skills" -type l)"
 
 # Past the retention window: pruned on read. Last, since the clock jump
 # prunes everything else too.
