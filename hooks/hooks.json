@@ -1,10 +1,10 @@
 {
   "hooks": {
     "SessionStart": [
-      { "hooks": [{ "type": "command", "command": "\"$HOME/.scripts/agent-sessions\" track claude" }] }
+      { "hooks": [{ "type": "command", "command": "\"${CLAUDE_PLUGIN_ROOT}\"/scripts/agent-sessions track claude" }] }
     ],
     "SessionEnd": [
-      { "hooks": [{ "type": "command", "command": "\"$HOME/.scripts/agent-sessions\" track claude" }] }
+      { "hooks": [{ "type": "command", "command": "\"${CLAUDE_PLUGIN_ROOT}\"/scripts/agent-sessions track claude" }] }
     ]
   }
 }

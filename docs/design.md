@@ -1,7 +1,7 @@
-# Agent sessions
+# Design
 
-Reopen the agent CLI sessions a reboot closed, laid out the way they were
-worked: one Ghostty window, a tab per repo, a split per session.
+How agent-sessions decides what to reopen, and the measurements behind each
+rule. Install and quick use are in the [README](../README.md).
 
 ## Use
 
@@ -74,13 +74,18 @@ using throwaway sessions:
   window, tabs and splits, each pane with its own directory and command,
   and `restore -y` reproduced a 3 + 2 layout across two repos.
 
-**Not yet verified:** an actual reboot. The design does not depend on
-whether the hook gets to run at shutdown — a record that never ended is
-reopened as lost — but confirm it once after the next one: `agent-restore -n`.
+A real reboot followed by `agent-restore` reopened the sessions (reported
+by the author on 2026-10-04, on the version extracted here). The design does
+not depend on whether the hook gets to run at shutdown: a record that never
+ended is reopened as lost.
 
-`scripts/test-agent-sessions.sh` replays those payload shapes against a fixed
-clock; `validate.sh` runs it and asserts the plugin link and hook command
-resolve on this machine.
+Packaged as a marketplace plugin (2026-10-04, Claude Code 2.1.289): the hook
+runs from the installed copy via `${CLAUDE_PLUGIN_ROOT}` and records the
+session, and the Homebrew `agent-restore` reads the same records.
+
+`tests/contract.sh` replays those payload shapes against a fixed clock. It
+also runs the hook command exactly as `hooks/hooks.json` spells it, so a
+wrong plugin path fails the test rather than silently recording nothing.
 
 ## Security
 
@@ -93,9 +98,9 @@ resolve on this machine.
 ## Extending
 
 Everything tool-specific sits in the adapter block at the top of
-`thefiles/.scripts/agent-sessions`: `track_<tool>`, `resume_command`,
-`resumable`, `current_name`. A new CLI needs those plus its hooks wired to
-`agent-sessions track <tool>`, as `agent-sessions/claude/` does for Claude.
+`scripts/agent-sessions`: `track_<tool>`, `resume_command`, `resumable`,
+`worked_in`, `current_name`. A new CLI needs those plus its hooks wired to
+`agent-sessions track <tool>`, as `hooks/hooks.json` does for Claude.
 Gemini CLI 0.18.4 has hook code but resumes only by index or `latest`, not
 by id, so it cannot be restored this way yet.
 

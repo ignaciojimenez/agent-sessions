@@ -1,16 +1,16 @@
 #!/bin/bash
 #
-# Contract test for thefiles/.scripts/agent-sessions.
+# Contract test for scripts/agent-sessions.
 #
 # Replays hook payloads shaped exactly like the ones Claude Code 2.1.27x sends
-# (captured live — see docs/agent-sessions.md) into a throwaway state dir,
+# (captured live — see docs/design.md) into a throwaway state dir,
 # with a fixed clock, then asserts on the records and on the restore plan.
 # No terminal, no network, no real sessions; runs on macOS and Linux.
 
 set -uo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
-BIN="${AGENT_SESSIONS_BIN:-$ROOT/thefiles/.scripts/agent-sessions}"
+BIN="${AGENT_SESSIONS_BIN:-$ROOT/scripts/agent-sessions}"
 T="$(mktemp -d -t agent-sessions-test.XXXXXX)"
 FAKE_PID=""
 trap '[[ -n "$FAKE_PID" ]] && kill "$FAKE_PID" 2>/dev/null; rm -rf "$T"' EXIT
@@ -133,6 +133,25 @@ check "plan reopens an unnamed session that was worked in" has "$plan" "(unnamed
 check "plan skips an unnamed session nothing happened in" \
   has "$plan" "skipping unnamed session in $T/repo: nothing in it"
 check "plan reports sessions with nothing to resume" has "$plan" "theta: nothing to resume"
+
+# Packaging. The hook command exactly as hooks/hooks.json spells it, run
+# through a shell with the plugin root Claude Code exports to hooks: a wrong
+# path there records nothing, silently, in every session.
+hook=$(jq -r '.hooks.SessionStart[0].hooks[0].command' "$ROOT/hooks/hooks.json")
+check "SessionStart and SessionEnd run the same command" \
+  test "$hook" = "$(jq -r '.hooks.SessionEnd[0].hooks[0].command' "$ROOT/hooks/hooks.json")"
+jq -n --arg tp "$T/transcripts/cccccccc-0001.jsonl" --arg cwd "$T/repo" \
+  '{session_id: "cccccccc-0001", transcript_path: $tp, cwd: $cwd,
+    hook_event_name: "SessionStart", source: "startup", session_title: "hooked"}' |
+  AGENT_SESSIONS_NOW=9300 CLAUDE_PLUGIN_ROOT="$ROOT" sh -c "$hook"
+check "the plugin's hook command records a session" record cccccccc-0001
+
+# Installed as agent-restore (the Homebrew formula's second name), it restores.
+ln -s "$BIN" "$T/bin/agent-restore"
+plan=$(AGENT_SESSIONS_NOW=9400 "$T/bin/agent-restore" -n)
+check "agent-restore prints a plan" has "$plan" "session(s) in"
+check "agent-restore is restore" \
+  test "$plan" = "$(AGENT_SESSIONS_NOW=9400 "$BIN" restore -n)"
 
 # Past the retention window: pruned on read. Last, since the clock jump
 # prunes everything else too.

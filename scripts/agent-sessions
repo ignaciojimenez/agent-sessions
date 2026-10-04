@@ -9,8 +9,8 @@
 #   agent-sessions restore [-n] [-y]   reopen the last batch of closed sessions
 #                                      -n: print the plan only   -y: don't ask
 #
-# `agent-restore` is the alias for `restore`. How it decides what to reopen,
-# and the evidence behind each rule: docs/agent-sessions.md.
+# Run as `agent-restore`, it is `restore`. How it decides what to reopen, and
+# the evidence behind each rule: docs/design.md.
 
 set -uo pipefail
 
@@ -306,6 +306,9 @@ APPLESCRIPT
 # ─── Main ────────────────────────────────────────────────────────────────────
 
 command -v jq >/dev/null || die "jq is required (brew install jq)"
+
+# Installed under the name agent-restore, it is the restore command.
+[[ "${0##*/}" == agent-restore ]] && set -- restore "$@"
 
 case "${1:-}" in
   track)

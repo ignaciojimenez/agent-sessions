@@ -1,5 +1,10 @@
 {
   "name": "agent-sessions",
-  "description": "Records each Claude Code session so `agent-restore` can reopen it after a reboot.",
-  "author": { "name": "Ignacio Jiménez Pi" }
+  "version": "1.0.0",
+  "description": "Reopen the Claude Code sessions a reboot closed: one Ghostty window, a tab per repo, a split per session.",
+  "author": { "name": "Ignacio Jiménez Pi", "url": "https://github.com/ignaciojimenez" },
+  "homepage": "https://github.com/ignaciojimenez/agent-sessions",
+  "repository": "https://github.com/ignaciojimenez/agent-sessions",
+  "license": "MIT",
+  "keywords": ["sessions", "restore", "reboot", "ghostty", "hooks"]
 }

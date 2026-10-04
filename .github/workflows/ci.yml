@@ -1,0 +1,45 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# Read-only: every job only checks out and inspects the tree.
+permissions:
+  contents: read
+
+jobs:
+  test:
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      # jq and git ship with both runner images; the test needs nothing else.
+      - name: Contract test
+        run: tests/contract.sh
+
+  shellcheck:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: shellcheck
+        run: shellcheck --severity=warning scripts/agent-sessions tests/contract.sh
+
+  manifests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Manifests parse, and the plugin and marketplace agree on the name
+        run: |
+          for f in .claude-plugin/*.json hooks/hooks.json; do jq empty "$f"; done
+          test "$(jq -r .name .claude-plugin/plugin.json)" = \
+               "$(jq -r '.plugins[0].name' .claude-plugin/marketplace.json)"

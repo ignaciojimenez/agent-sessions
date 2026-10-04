@@ -1,0 +1,8 @@
+{
+  "name": "agent-sessions",
+  "owner": { "name": "Ignacio Jiménez Pi", "url": "https://github.com/ignaciojimenez" },
+  "description": "Reopen the Claude Code sessions a reboot closed.",
+  "plugins": [
+    { "name": "agent-sessions", "source": "./" }
+  ]
+}
