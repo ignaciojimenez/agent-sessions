@@ -1,13 +1,15 @@
 #!/bin/bash
 #
 # agent-sessions — remember which agent CLI sessions are open, and reopen them
-# after a reboot the way they were laid out: one Ghostty window, a tab per
-# repo, a split per session.
+# after a reboot the way they were laid out: a tab per repo, a split per
+# session.
 #
-#   agent-sessions track <tool>        hook entry point; reads the hook JSON on stdin
-#   agent-sessions list                every recorded session and its state
-#   agent-sessions restore [-n] [-y]   reopen the last batch of closed sessions
-#                                      -n: print the plan only   -y: don't ask
+#   agent-sessions track <tool>      hook entry point; reads the hook JSON on stdin
+#   agent-sessions list              every recorded session and its state
+#   agent-sessions restore [-n] [-y] [-t <terminal>]
+#                                    reopen the last batch of closed sessions
+#                                    -n: print the plan only   -y: don't ask
+#                                    -t: ghostty, tmux or print (default: detected)
 #
 # Run as `agent-restore`, it is `restore`. How it decides what to reopen, and
 # the evidence behind each rule: docs/design.md.
@@ -210,14 +212,17 @@ select_batch() {
 }
 
 cmd_restore() {
-  local dry_run=0 assume_yes=0 opt
-  while getopts "ny" opt; do
+  local dry_run=0 assume_yes=0 terminal="${AGENT_SESSIONS_TERMINAL:-}" opt
+  while getopts "nyt:" opt; do
     case "$opt" in
       n) dry_run=1 ;;
       y) assume_yes=1 ;;
-      *) die "usage: agent-sessions restore [-n] [-y]" ;;
+      t) terminal=$OPTARG ;;
+      *) die "usage: agent-sessions restore [-n] [-y] [-t <terminal>]" ;;
     esac
   done
+  terminal=${terminal:-$(detect_terminal)}
+  declare -F "open_$terminal" >/dev/null || die "no terminal adapter '$terminal' (ghostty, tmux, print)"
 
   # Resolve names and group by repo: lines of  repo started name cwd command
   local plan="" skipped=() tool id name cwd transcript started repo cmd
@@ -248,32 +253,52 @@ cmd_restore() {
   echo
   while IFS="$SEP" read -r repo started name cwd cmd; do
     if [[ "$repo" != "$current" ]]; then
-      current=$repo; tabs=$((tabs + 1)); args+=(--tab)
+      current=$repo; tabs=$((tabs + 1)); args+=(--tab "${repo##*/}")
       printf '  %s  %s\n' "${repo##*/}" "${repo/#$HOME/~}"
     fi
     sessions=$((sessions + 1)); args+=("$cwd" "$cmd")
     printf '      %s\n' "$name"
   done <<<"$plan"
   echo
-  echo "$sessions session(s) in $tabs tab(s)."
+  echo "$sessions session(s) in $tabs tab(s), via $terminal."
 
   [[ "$dry_run" -eq 1 ]] && return 0
-  if [[ "$assume_yes" -eq 0 ]]; then
+  # Printing opens nothing, so there is nothing to confirm.
+  if [[ "$assume_yes" -eq 0 && "$terminal" != print ]]; then
     local answer
     read -r -p "Reopen? [y/N] " answer
     [[ "$answer" =~ ^[Yy]$ ]] || return 0
   fi
-  open_ghostty "${args[@]}"
+  "open_$terminal" "${args[@]}"
 }
 
-# ─── Terminal adapter: Ghostty (macOS, AppleScript) ──────────────────────────
-# Ghostty's `+new-window` CLI action is unsupported on macOS; AppleScript is
-# its only scripting surface there. Arguments: --tab starts a tab, then
-# directory/command pairs, each opening a split in that tab. The directory
-# is set as a surface property and only the command is typed into the shell.
+# ─── Terminal adapters ───────────────────────────────────────────────────────
+# Each open_<terminal> takes the same layout: `--tab <label>` starts a tab,
+# then <directory> <command> pairs, each a split in that tab. The directory
+# is set as a property of the new pane and never typed; only the command,
+# built from a validated id, is typed into the pane's shell, so the shell is
+# still there once the agent exits.
+
+# Inside tmux, tmux. In Ghostty on macOS, Ghostty. Anywhere else, print the
+# commands rather than guess at a terminal.
+detect_terminal() {
+  if [[ -n "${TMUX:-}" ]]; then echo tmux
+  elif [[ "${TERM_PROGRAM:-}" == ghostty && "$(uname -s)" == Darwin ]]; then echo ghostty
+  else echo print
+  fi
+}
+
+# Ghostty (macOS). Its `+new-window` CLI action is unsupported on macOS, so
+# AppleScript is the only scripting surface. The script takes a bare --tab,
+# so the label is dropped here.
 open_ghostty() {
-  [[ "$(uname -s)" == Darwin ]] || die "reopening windows needs macOS + Ghostty"
-  osascript - "$@" >/dev/null <<'APPLESCRIPT' || die "Ghostty refused the layout (see above)"
+  [[ "$(uname -s)" == Darwin ]] || die "the ghostty adapter needs macOS; try -t tmux"
+  local layout=()
+  while [[ $# -gt 0 ]]; do
+    if [[ "$1" == --tab ]]; then layout+=(--tab); else layout+=("$1" "$2"); fi
+    shift 2
+  done
+  osascript - "${layout[@]}" >/dev/null <<'APPLESCRIPT' || die "Ghostty refused the layout (see above)"
 on run argv
   tell application "Ghostty"
     set win to missing value
@@ -307,6 +332,52 @@ end run
 APPLESCRIPT
 }
 
+# tmux: any terminal, any OS. A window per tab, a pane per session. Inside
+# tmux the windows join the current session; outside, they go in a new one,
+# attached when there is a terminal to attach it to.
+open_tmux() {
+  command -v tmux >/dev/null || die "tmux is not installed"
+  local session="" window="" pane label
+  if [[ -z "${TMUX:-}" ]]; then
+    session=agent-sessions
+    tmux has-session -t "=$session" 2>/dev/null && session="agent-sessions-$(now)"
+  fi
+  while [[ $# -gt 0 ]]; do
+    if [[ "$1" == --tab ]]; then
+      label=$2; window=""; shift 2; continue
+    fi
+    if [[ -z "$window" ]]; then
+      if [[ -n "$session" ]] && ! tmux has-session -t "=$session" 2>/dev/null; then
+        pane=$(tmux new-session -d -P -F '#{pane_id}' -s "$session" -n "$label" -c "$1")
+      else
+        pane=$(tmux new-window -P -F '#{pane_id}' ${session:+-t "=$session:"} -n "$label" -c "$1")
+      fi || die "tmux could not open a window"
+      window=$(tmux display-message -p -t "$pane" '#{window_id}')
+    else
+      pane=$(tmux split-window -h -P -F '#{pane_id}' -t "$window" -c "$1") ||
+        die "tmux could not split the window"
+      tmux select-layout -t "$window" even-horizontal
+    fi
+    tmux send-keys -t "$pane" -l "$2" && tmux send-keys -t "$pane" Enter
+    shift 2
+  done
+  [[ -n "$session" ]] || return 0
+  if [[ -t 0 && -t 1 ]]; then tmux attach-session -t "=$session"
+  else echo "Opened in tmux session $session: tmux attach -t $session"
+  fi
+}
+
+# print: the commands, to run by hand in whatever terminal there is.
+open_print() {
+  echo
+  while [[ $# -gt 0 ]]; do
+    if [[ "$1" == --tab ]]; then printf '# %s\n' "$2"
+    else printf 'cd %q && %s\n' "$1" "$2"
+    fi
+    shift 2
+  done
+}
+
 # ─── Main ────────────────────────────────────────────────────────────────────
 
 command -v jq >/dev/null || die "jq is required (brew install jq)"
@@ -322,5 +393,5 @@ case "${1:-}" in
     ;;
   list) cmd_list ;;
   restore) shift; cmd_restore "$@" ;;
-  *) sed -n '3,13s/^# \{0,1\}//p' "$0"; exit 1 ;;
+  *) sed -n '3,15s/^# \{0,1\}//p' "$0"; exit 1 ;;
 esac

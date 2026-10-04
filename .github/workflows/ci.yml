@@ -12,6 +12,8 @@ permissions:
 jobs:
   test:
     strategy:
+      # Report every OS; one failing must not cancel the other.
+      fail-fast: false
       matrix:
         os: [ubuntu-latest, macos-latest]
     runs-on: ${{ matrix.os }}
@@ -19,7 +21,9 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      # jq and git ship with both runner images; the test needs nothing else.
+      # jq and git ship with both runner images; tmux is the one addition.
+      - name: Install tmux
+        run: if command -v apt-get >/dev/null; then sudo apt-get install -y tmux; else brew install tmux; fi
       - name: Contract test
         run: tests/contract.sh
 

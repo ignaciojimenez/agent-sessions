@@ -1,4 +1,5 @@
--- Agent Restore: agent-restore for Spotlight. Shows the plan, asks, reopens.
+-- Agent Restore: agent-restore for Spotlight. Shows the plan, asks, reopens
+-- in Ghostty: an app has no terminal of its own to detect.
 --
 -- Template: install.sh fills in the two values below and compiles it into
 -- ~/Applications/Agent Restore.app. An app gets a bare PATH, so install.sh
@@ -8,7 +9,7 @@ property tool : "@@TOOL@@"
 property searchPath : "@@PATH@@"
 
 on run
-	set restore to "PATH=" & quoted form of searchPath & " " & quoted form of tool & " restore"
+	set restore to "PATH=" & quoted form of searchPath & " " & quoted form of tool & " restore -t ghostty"
 	try
 		set plan to do shell script restore & " -n"
 	on error errorText
