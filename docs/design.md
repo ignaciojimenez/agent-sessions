@@ -96,6 +96,28 @@ also runs `install.sh` into a throwaway `HOME` and then the hook command
 exactly as the Claude adapter spells it, so a wrong path fails the test
 rather than silently recording nothing.
 
+## Spotlight
+
+`install.sh` compiles `macos/agent-restore.applescript` with `osacompile` into
+`~/Applications/Agent Restore.app`, which Spotlight indexes. It runs
+`agent-sessions restore -n`, shows the plan in a dialog, and runs
+`restore -y` on **Reopen**. Three things an app does differently from a
+terminal, and how each is handled:
+
+- **A bare `PATH`.** `do shell script` gets `/usr/bin:/bin:/usr/sbin:/sbin`.
+  `install.sh` bakes in the tool's path and the directories it found `jq` and
+  `git` in, rather than guessing at Homebrew prefixes.
+- **Automation permission.** The app, not a terminal, sends Apple Events to
+  Ghostty, so macOS asks once. Its ad-hoc signature changes with every
+  build, which may ask again, so `install.sh` rebuilds only when the
+  generated source differs from the copy stored inside the app.
+- **No terminal to report to.** Failures are shown in an alert.
+
+`tests/contract.sh` loads the compiled script and runs its restore command
+through `do shell script`, with the baked values: the part that breaks when
+an app's environment differs from a terminal's. The dialogs and Ghostty's
+permission prompt need a person.
+
 ## Security
 
 - The session id names a file and is typed into a shell, so it must match

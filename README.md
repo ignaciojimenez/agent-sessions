@@ -33,7 +33,8 @@ cd agent-sessions && ./install.sh
 ```
 
 `install.sh` links the script into `~/.local/bin` as `agent-sessions` and
-`agent-restore`, and wires an adapter for each agent CLI it finds. Every link
+`agent-restore`, wires an adapter for each agent CLI it finds, and on macOS
+builds `~/Applications/Agent Restore.app`. Every link
 points into the clone, so `git pull` updates it; `./install.sh --uninstall`
 removes them. Start agent sessions afresh afterwards: hooks load at startup.
 
@@ -49,6 +50,10 @@ agent-restore -y          # no prompt
 agent-sessions list       # every recorded session: running, closed or lost
 ```
 
+Or skip the terminal: open **Agent Restore** from Spotlight. It shows the
+same plan in a dialog and reopens on **Reopen**; Ghostty need not be running.
+The first time, macOS asks to let it control Ghostty.
+
 Records live in `~/.local/state/agent-sessions/` (`0700`) and hold paths and
 session names only, never conversation content. They are pruned after 14 days.
 
@@ -63,6 +68,7 @@ session names only, never conversation content. They are pruned after 14 days.
 ```
 agent-sessions        the tool: records sessions, plans and reopens them
 adapters/<cli>/       how one agent CLI reports its sessions to it
-install.sh            links the tool onto PATH and wires the adapters
+macos/                the Spotlight app's source, compiled by install.sh
+install.sh            links the tool onto PATH, wires the adapters, builds the app
 tests/contract.sh     replays real hook payloads; also tests install.sh
 ```

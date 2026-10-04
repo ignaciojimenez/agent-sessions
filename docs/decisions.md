@@ -2,6 +2,9 @@
 
 One-liners, newest first. The reasoning for each lives in `design.md`.
 
+- **2026-10-04 — Spotlight gets an AppleScript app, built on install.** Spotlight
+  launches apps, not commands. `osacompile` ships with macOS and needs no
+  signing identity; a Shortcuts shortcut would need its UI to create.
 - **2026-10-04 — The tool is the centre; each agent CLI is an adapter.** The
   script sits at the root and is installed by `git clone` + `install.sh`,
   which links it into `~/.local/bin` and wires `adapters/<cli>/` for the CLIs

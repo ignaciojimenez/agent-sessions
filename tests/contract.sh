@@ -160,6 +160,31 @@ plan=$(AGENT_SESSIONS_NOW=9400 "$H/.local/bin/agent-restore" -n)
 check "agent-restore prints a plan" has "$plan" "session(s) in"
 check "agent-restore is restore" test "$plan" = "$(AGENT_SESSIONS_NOW=9400 "$BIN" restore -n)"
 
+# The Spotlight app (macOS). Its dialogs need a person, so this loads the
+# compiled script and runs its restore command the way the app does: through
+# `do shell script`, whose bare environment is what breaks apps, with the
+# PATH and tool path install.sh baked in.
+if [[ "$(uname -s)" == Darwin ]]; then
+  app="$H/Applications/Agent Restore.app"
+  check "install builds the Spotlight app" test -f "$app/Contents/Resources/Scripts/main.scpt"
+  # shellcheck disable=SC2016  # $s is AppleScript, not shell
+  app_plan=$(osascript \
+    -e "set s to load script POSIX file \"$app/Contents/Resources/Scripts/main.scpt\"" \
+    -e "do shell script \"AGENT_SESSIONS_STATE=$AGENT_SESSIONS_STATE AGENT_SESSIONS_NOW=9400 PATH=\" & quoted form of (searchPath of s) & \" \" & quoted form of (tool of s) & \" restore -n\"" \
+    2>&1)
+  check "the app's baked tool path is the installed link" \
+    has "$(osadecompile "$app/Contents/Resources/Scripts/main.scpt")" "$H/.local/bin/agent-sessions"
+  check "the app's restore command plans in an app's environment" \
+    test "$(tr '\r' '\n' <<<"$app_plan")" = "$plan"
+  inode=$(stat -f %i "$app/Contents/Resources/Scripts/main.scpt")
+  HOME="$H" "$ROOT/install.sh" >/dev/null
+  check "a re-run leaves a current app alone" \
+    test "$(stat -f %i "$app/Contents/Resources/Scripts/main.scpt")" = "$inode"
+  H3="$T/home3"; mkdir -p "$H3/Applications/Agent Restore.app"; touch "$H3/Applications/Agent Restore.app/theirs"
+  check "install refuses to replace an app it did not build" eval '! HOME="$H3" "$ROOT/install.sh" >/dev/null'
+  check "that app is left as it was" test -f "$H3/Applications/Agent Restore.app/theirs"
+fi
+
 # A real file where a link goes is never replaced, and the install says so.
 H2="$T/home2"; mkdir -p "$H2/.local/bin"; echo keep >"$H2/.local/bin/agent-restore"
 check "install refuses to replace a file" eval '! HOME="$H2" "$ROOT/install.sh" >/dev/null'
@@ -168,6 +193,7 @@ check "the file is left as it was" test "$(cat "$H2/.local/bin/agent-restore")" 
 HOME="$H" "$ROOT/install.sh" --uninstall >/dev/null
 check "uninstall removes every link" \
   test -z "$(find "$H/.local/bin" "$H/.claude/skills" -type l)"
+check "uninstall removes the app it built" test ! -e "$H/Applications/Agent Restore.app"
 
 # Past the retention window: pruned on read. Last, since the clock jump
 # prunes everything else too.
