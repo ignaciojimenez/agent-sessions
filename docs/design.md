@@ -85,9 +85,11 @@ by the author on 2026-10-04, on the version extracted here). The design does
 not depend on whether the hook gets to run at shutdown: a record that never
 ended is reopened as lost.
 
-Packaged as a marketplace plugin (2026-10-04, Claude Code 2.1.289): the hook
-runs from the installed copy via `${CLAUDE_PLUGIN_ROOT}` and records the
-session, and the Homebrew `agent-restore` reads the same records.
+Packaged as a marketplace plugin (2026-10-04, Claude Code 2.1.289), installed
+from GitHub: the hook runs from the cached copy via `${CLAUDE_PLUGIN_ROOT}`
+and records an interactive session (a hang-up ends it as `other`), a
+headless one is never recorded, and the script run as `agent-restore` plans
+from the same records.
 
 `tests/contract.sh` replays those payload shapes against a fixed clock. It
 also runs the hook command exactly as `hooks/hooks.json` spells it, so a
