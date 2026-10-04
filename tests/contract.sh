@@ -23,7 +23,7 @@ unset TMUX AGENT_SESSIONS_TERMINAL
 PASS=0 FAIL=0
 check() {  # <description> <command...>
   local desc=$1; shift
-  if "$@"; then PASS=$((PASS + 1)); else FAIL=$((FAIL + 1)); echo "  ✗ $desc"; fi
+  if "$@"; then PASS=$((PASS + 1)); else FAIL=$((FAIL + 1)); echo "  ✗ $desc"; return 1; fi
 }
 has()    { grep -qF -- "$2" <<<"$1"; }
 hasnt()  { ! grep -qF -- "$2" <<<"$1"; }
@@ -164,13 +164,14 @@ check "print gives a command per session" has "$printed" "cd $T/repo && claude -
 # and the command typed into each pane. CI installs tmux; locally it is
 # skipped, loudly, if missing.
 if command -v tmux >/dev/null; then
-  # A stub agent first on PATH, so the panes never start a real one. The
-  # server is started here, without the user's config, running a non-login
-  # shell: a login shell would rebuild PATH and find the real agent.
+  # A stub agent, so the panes never start a real one. The server is started
+  # here, without the user's config, and every pane runs a non-login shell
+  # with the stub first on an explicit PATH: neither a login profile nor
+  # tmux's environment handling can put the real agent in front of it.
   mkdir -p "$T/stub" && printf '#!/bin/sh\necho "agent $* in $PWD"\n' >"$T/stub/claude" && chmod +x "$T/stub/claude"
-  echo 'set -g default-command "exec /bin/sh"' >"$TM/tmux.conf"
+  echo "set -g default-command \"exec env PATH='$T/stub:/usr/bin:/bin' /bin/sh\"" >"$TM/tmux.conf"
   tmux_ -f "$TM/tmux.conf" new-session -d -s keepalive
-  tmux_restore() { PATH="$T/stub:$PATH" TMUX_TMPDIR="$TM" AGENT_SESSIONS_NOW=9200 "$BIN" restore -y -t tmux; }
+  tmux_restore() { TMUX_TMPDIR="$TM" AGENT_SESSIONS_NOW=9200 "$BIN" restore -y -t tmux; }
   out=$(tmux_restore)
   check "tmux opens a session to attach to" has "$out" "tmux attach -t agent-sessions"
   check "tmux opens a window per repo, a pane per session" \
@@ -184,7 +185,8 @@ if command -v tmux >/dev/null; then
     sleep 0.5
   done
   check "tmux runs every resume command, each in its own directory" \
-    test "$(grep -c '^agent --resume' <<<"$ran")" = 6
+    test "$(grep -c '^agent --resume' <<<"$ran")" = 6 ||
+    grep -v '^$' <<<"$ran" | sed 's/^/      | /'
   check "tmux resumes the session in its subdirectory" has "$ran" "agent --resume aaaaaaaa-0005 in $T/repo/sub"
   out=$(tmux_restore)
   check "a second restore never reuses the session" has "$out" "tmux attach -t agent-sessions-9200"

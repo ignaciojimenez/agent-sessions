@@ -12,6 +12,8 @@ permissions:
 jobs:
   test:
     strategy:
+      # Report every OS; one failing must not cancel the other.
+      fail-fast: false
       matrix:
         os: [ubuntu-latest, macos-latest]
     runs-on: ${{ matrix.os }}
