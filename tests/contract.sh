@@ -54,6 +54,10 @@ transcript() {  # <id> [title...] — one custom-title record per rename
       >>"$T/transcripts/$id.jsonl"
   done
 }
+said() {  # <id> <type> — append one conversation record to the transcript
+  jq -nc --arg t "$2" --arg id "$1" '{type: $t, sessionId: $id, message: {content: "x"}}' \
+    >>"$T/transcripts/$1.jsonl"
+}
 
 echo "agent-sessions contract"
 
@@ -94,8 +98,12 @@ jq --argjson p "$FAKE_PID" '.pid = $p' "$f" >"$f.new" && mv "$f.new" "$f"
 # Closed long before the last batch: not part of it.
 start 1000 aaaaaaaa-0009 "old"; end 2000 aaaaaaaa-0009 other; transcript aaaaaaaa-0009
 
-# Unnamed, and named but never used (no transcript).
+# Unnamed: one only opened and /cleared (no assistant turn), one worked in.
 start 5000 aaaaaaaa-0010 ""; end 9000 aaaaaaaa-0010 other; transcript aaaaaaaa-0010
+said aaaaaaaa-0010 user
+start 5000 bbbbbbbb-0014 "" "$T/repo2"; end 9000 bbbbbbbb-0014 other
+transcript bbbbbbbb-0014; said bbbbbbbb-0014 user; said bbbbbbbb-0014 assistant
+# Named but never used (no transcript).
 start 5000 aaaaaaaa-0011 "theta"; end 9000 aaaaaaaa-0011 other
 
 # No terminal (`claude --bg`): never recorded.
@@ -118,10 +126,12 @@ check "plan includes the last batch" has "$plan" "zeta"
 check "plan includes lost sessions" has "$plan" "delta"
 check "plan groups a subdirectory under its repo" \
   test "$(grep -A4 "  repo  " <<<"$plan" | grep -c beta)" = 1
-check "plan opens one tab per repo" has "$plan" "5 session(s) in 2 tab(s)."
+check "plan opens one tab per repo" has "$plan" "6 session(s) in 2 tab(s)."
 check "plan leaves running sessions alone" hasnt "$plan" "epsilon"
 check "plan leaves out sessions closed before the batch" hasnt "$plan" "      old"
-check "plan reports unnamed sessions" has "$plan" "skipping unnamed session"
+check "plan reopens an unnamed session that was worked in" has "$plan" "(unnamed bbbbbbbb)"
+check "plan skips an unnamed session nothing happened in" \
+  has "$plan" "skipping unnamed session in $T/repo: nothing in it"
 check "plan reports sessions with nothing to resume" has "$plan" "theta: nothing to resume"
 
 # Past the retention window: pruned on read. Last, since the clock jump
