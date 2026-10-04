@@ -15,7 +15,7 @@ T="$(mktemp -d -t agent-sessions-test.XXXXXX)"
 FAKE_PID=""
 trap '[[ -n "$FAKE_PID" ]] && kill "$FAKE_PID" 2>/dev/null; rm -rf "$T"' EXIT
 
-export AGENT_SESSIONS_STATE="$T/state" TERM_PROGRAM=test
+export AGENT_SESSIONS_STATE="$T/state" TERM_PROGRAM=test CLAUDE_CODE_ENTRYPOINT=cli
 PASS=0 FAIL=0
 check() {  # <description> <command...>
   local desc=$1; shift
@@ -109,6 +109,10 @@ start 5000 aaaaaaaa-0011 "theta"; end 9000 aaaaaaaa-0011 other
 # No terminal (`claude --bg`): never recorded.
 TERM_PROGRAM="" start 5000 aaaaaaaa-0012 "background"
 check "a session without a terminal is not recorded" eval '! record aaaaaaaa-0012'
+
+# Headless (`claude -p` from a terminal): never recorded either.
+CLAUDE_CODE_ENTRYPOINT=sdk-cli start 5000 aaaaaaaa-0015 "headless"
+check "a headless session is not recorded" eval '! record aaaaaaaa-0015'
 
 # Ids that could escape the state dir or become a shell option are refused.
 start 5000 "../../escape" "evil" 2>/dev/null

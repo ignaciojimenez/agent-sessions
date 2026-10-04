@@ -30,6 +30,7 @@ the agent's pid, and when it started and ended.
 | `SessionEnd` `prompt_input_exit`, `logout`, `clear`, `resume` | deleted: closed on purpose, or handed over to a new session |
 | `SessionEnd` `other` | kept, stamped with its end time |
 | no `TERM_PROGRAM` (`claude --bg`) | never written: nothing to reopen in a terminal |
+| `CLAUDE_CODE_ENTRYPOINT` other than `cli` (`claude -p`, the SDK) | never written: a headless run, even one started from a terminal |
 
 `other` covers a closed terminal, Ctrl-C, SIGHUP, SIGTERM, `claude stop` —
 and a reboot. They cannot be told apart when they happen, so `restore` tells
@@ -67,6 +68,11 @@ using throwaway sessions:
 - A session killed before its first exchange may have no transcript and
   cannot be resumed — hence the check.
 - Background sessions fire the same hooks without `TERM_PROGRAM`.
+- `claude -p` from a terminal fires both hooks with `TERM_PROGRAM` set and
+  ends with `other`, so it looked like a session a reboot closed. Claude sets
+  `CLAUDE_CODE_ENTRYPOINT` in the hook's environment itself: `cli` for an
+  interactive session, `sdk-cli` for `-p` (2.1.289, measured both ways with
+  the inherited value unset).
 - A folder with `.claude-plugin/plugin.json` symlinked into
   `~/.claude/skills/` loads with its hooks, no install step, no
   `settings.json` change.
