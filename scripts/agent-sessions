@@ -45,6 +45,16 @@ resumable() {  # <tool> <transcript>
   esac
 }
 
+# Whether the agent ever answered in it. Separates real work from a session
+# opened and closed again, which leaves a transcript of setup records and
+# local commands (/clear, /mcp) but no assistant turn.
+worked_in() {  # <tool> <transcript>
+  case "$1" in
+    claude) [[ -f "$2" ]] && grep -qF '"type":"assistant"' "$2" ;;
+    *) return 0 ;;
+  esac
+}
+
 # A session can be renamed after it starts (/rename) and no hook fires when
 # it is. Claude appends a custom-title record to the transcript on every
 # rename, so the last one is the current name.
@@ -210,7 +220,14 @@ cmd_restore() {
   while IFS="$SEP" read -r tool id name cwd transcript started; do
     [[ -n "$tool" ]] || continue
     name=$(current_name "$tool" "$transcript" "$name")
-    if [[ -z "$name" ]]; then skipped+=("unnamed session in ${cwd/#$HOME/~}"); continue; fi
+    # Unnamed is no reason to lose work: name it by its id, and leave out
+    # only the ones nothing happened in. The prompt below is the filter.
+    if [[ -z "$name" ]]; then
+      if ! worked_in "$tool" "$transcript"; then
+        skipped+=("unnamed session in ${cwd/#$HOME/~}: nothing in it"); continue
+      fi
+      name="(unnamed ${id:0:8})"
+    fi
     if [[ ! -d "$cwd" ]]; then skipped+=("$name: ${cwd/#$HOME/~} no longer exists"); continue; fi
     if ! resumable "$tool" "$transcript"; then skipped+=("$name: nothing to resume (no transcript)"); continue; fi
     if ! cmd=$(resume_command "$tool" "$id"); then skipped+=("$name: no resume command for $tool"); continue; fi

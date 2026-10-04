@@ -5,8 +5,9 @@ worked: one Ghostty window, a tab per repo, a split per session.
 
 ## Use
 
-1. Name every session you'd want back: `claude -n <name>`, or `/rename` later.
-   Unnamed sessions are recorded but never reopened.
+1. Name sessions: `claude -n <name>`, or `/rename` later. A name is what the
+   plan shows you; an unnamed session still comes back, as
+   `(unnamed <id prefix>)`, provided the agent ever answered in it.
 2. After a reboot, open Ghostty and run `agent-restore`. It prints the plan
    and asks before opening anything.
 
@@ -45,8 +46,10 @@ Records older than 14 days are pruned.
 
 For each session it resolves the current name (the last `custom-title`
 record in the transcript, since no hook fires on `/rename`), skips unnamed
-ones and ones without a transcript, groups the rest by git repo root, and
-drives Ghostty over AppleScript.
+ones with no assistant turn in the transcript (opened and closed again, or
+only local commands like `/clear`) and ones without a transcript, groups the
+rest by git repo root, and drives Ghostty over AppleScript. The `Reopen?`
+prompt is the filter for anything else you don't want back.
 
 ## What was verified
 
