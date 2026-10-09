@@ -34,15 +34,17 @@ now() { echo "${AGENT_SESSIONS_NOW:-$(date +%s)}"; }
 resume_command() {  # <tool> <id>
   case "$1" in
     claude) printf 'claude --resume %s' "$2" ;;
+    droid) printf 'droid --resume %s' "$2" ;;
     *) return 1 ;;
   esac
 }
 
 # Claude can only resume a session that has a transcript, and one killed
-# before its first exchange may never have written one.
+# before its first exchange may never have written one. Droid deletes the
+# transcript of a session nothing was said in.
 resumable() {  # <tool> <transcript>
   case "$1" in
-    claude) [[ -f "$2" ]] ;;
+    claude|droid) [[ -f "$2" ]] ;;
     *) return 0 ;;
   esac
 }
@@ -53,13 +55,16 @@ resumable() {  # <tool> <transcript>
 worked_in() {  # <tool> <transcript>
   case "$1" in
     claude) [[ -f "$2" ]] && grep -qF '"type":"assistant"' "$2" ;;
+    droid) [[ -f "$2" ]] && grep -qF '"role":"assistant"' "$2" ;;
     *) return 0 ;;
   esac
 }
 
 # A session can be renamed after it starts (/rename) and no hook fires when
 # it is. Claude appends a custom-title record to the transcript on every
-# rename, so the last one is the current name.
+# rename, so the last one is the current name. Droid rewrites the title in
+# the transcript's first line; one it made up from the first prompt is not
+# a name.
 current_name() {  # <tool> <transcript> <name recorded at start>
   local latest=""
   case "$1" in
@@ -67,8 +72,22 @@ current_name() {  # <tool> <transcript> <name recorded at start>
       [[ -f "$2" ]] && latest=$(grep -F '"type":"custom-title"' "$2" | tail -n 1 |
                                 jq -r '.customTitle // empty' 2>/dev/null)
       ;;
+    droid)
+      [[ -f "$2" ]] && latest=$(head -n 1 "$2" |
+        jq -r 'select(.isSessionTitleManuallySet == true) | .title // empty' 2>/dev/null)
+      ;;
   esac
   printf '%s' "${latest:-$3}"
+}
+
+# Droid fires no SessionStart on --resume, so a session restore reopened
+# keeps its closed record until its first prompt. Its command line shows it
+# is open again.
+resumed() {  # <tool> <id>
+  case "$1" in
+    droid) pgrep -f -- "(^|/)droid --resume $2( |\$)" >/dev/null ;;
+    *) return 1 ;;
+  esac
 }
 
 # Claude Code SessionStart / SessionEnd payloads.
@@ -102,6 +121,53 @@ track_claude() {
   esac
 }
 
+# Droid ends a session with "other" whether it was /exit, Ctrl-C, a closed
+# terminal or a reboot (measured, 0.231.0). The terminal tells them apart:
+# closing one hangs up its tty before the agent is signalled, so an agent
+# still holding its tty at the end was exited from inside it. Unknown when
+# the hook's parent is not the agent; then the session is kept.
+agent_holds_terminal() {  # <tool>
+  local pid tty
+  pid=$(agent_pid "$1") && [[ -n "$pid" ]] || return 1
+  tty=$(ps -o tty= -p "$pid" 2>/dev/null) || return 1
+  tty=${tty//[[:space:]]/}
+  [[ -n "$tty" && "$tty" != *'?'* ]]
+}
+
+# Droid SessionStart / UserPromptSubmit / SessionEnd payloads.
+track_droid() {
+  local fields event id reason cwd transcript file pid
+  fields=$(jq -r --arg s "$SEP" \
+    '[.hook_event_name, .session_id, .reason, .cwd, .transcript_path]
+     | map(. // "") | join($s)') || die "unreadable hook payload"
+  IFS="$SEP" read -r event id reason cwd transcript <<<"$fields"
+
+  # Nothing to reopen without a terminal, nor for a headless `droid exec`,
+  # the only run that sets this (0.231.0).
+  [[ -n "${TERM_PROGRAM:-}" && -z "${FACTORY_DISABLE_SETTINGS_PERSISTENCE:-}" ]] || return 0
+  valid_id "$id" || die "refusing session id '$id'"
+  file=$(record_file droid "$id")
+
+  case "$event" in
+    SessionStart) record_start droid "$id" "" "$cwd" "$transcript" ;;
+    UserPromptSubmit)
+      # A resumed or /cleared session gets no SessionStart, so its first
+      # prompt records it. Later prompts find it recorded by this process.
+      pid=$(agent_pid droid)
+      [[ -n "$pid" && "$(jq -r '.pid // empty' "$file" 2>/dev/null)" == "$pid" ]] ||
+        record_start droid "$id" "" "$cwd" "$transcript"
+      ;;
+    SessionEnd)
+      if [[ "$reason" != other ]] || agent_holds_terminal droid; then
+        record_forget droid "$id"
+      else
+        [[ -f "$file" ]] || record_start droid "$id" "" "$cwd" "$transcript"
+        record_end droid "$id" "$reason"
+      fi
+      ;;
+  esac
+}
+
 # ─── Records ─────────────────────────────────────────────────────────────────
 # One JSON file per session, so concurrent hooks never contend for a file.
 
@@ -111,8 +177,9 @@ valid_id() { [[ "$1" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$ ]]; }
 record_file() { echo "$STATE_DIR/$1-$2.json"; }
 
 # The agent's own process, so restore can tell a live session from a dead one.
-# Claude runs hook commands as its direct children (measured, 2.1.277), so
-# only the parent qualifies; anything further up could be an unrelated agent.
+# Claude and Droid run hook commands as their direct children (measured,
+# 2.1.277 and 0.231.0), so only the parent qualifies; anything further up
+# could be an unrelated agent.
 agent_pid() {  # <tool>
   local comm
   comm=$(ps -o comm= -p "$PPID" 2>/dev/null) && [[ "${comm##*/}" == "$1" ]] && echo "$PPID"
@@ -171,7 +238,8 @@ load_records() {
     if [[ $(( $(now) - ${ended:-$started} )) -gt $PRUNE_AFTER ]]; then
       record_forget "$tool" "$id"; continue
     fi
-    if [[ -n "$ended" ]]; then state=closed
+    if resumed "$tool" "$id"; then state=running
+    elif [[ -n "$ended" ]]; then state=closed
     elif running "$tool" "$pid"; then state=running
     else state=lost
     fi

@@ -83,6 +83,61 @@ followed by `agent-restore` reopened the sessions (2026-10-04). The design
 does not depend on the hook running at shutdown: a record that never ended
 is reopened as lost.
 
+## Droid adapter
+
+`adapters/droid/hooks.json` holds three hooks, each running
+`agent-sessions track droid`. Droid has no plugin folder it loads unasked,
+so `install.sh` merges them into the user hooks file: `~/.factory/hooks.json`
+if it exists, otherwise the `hooks` key of `~/.factory/settings.json`.
+Droid reads `settings.json` hooks only when there is no `hooks.json`, so
+creating one would silently drop the hooks declared there. The merge drops
+any group that runs the adapter's command and appends the adapter's, so a
+re-run changes nothing; uninstall drops them and leaves the rest as it was.
+
+| Hook event | Record |
+|---|---|
+| `SessionStart` (startup) | written |
+| `UserPromptSubmit`, no record from this process | written: a resumed or `/clear`ed session, which gets no `SessionStart` |
+| `SessionEnd` `clear`, `logout`, `prompt_input_exit` | deleted |
+| `SessionEnd` `other`, agent still holds its terminal | deleted: exited from inside (`/exit`, Ctrl-C) |
+| `SessionEnd` `other`, terminal gone | kept, stamped with its end time; written first if there was no record |
+| no `TERM_PROGRAM` | never written |
+| `FACTORY_DISABLE_SETTINGS_PERSISTENCE` set (`droid exec`) | never written: a headless run |
+
+The current name is the transcript's first-line `title` when
+`isSessionTitleManuallySet` is true; a title Droid derived from the first
+prompt is not used. "Nothing happened in it" means no `"role":"assistant"`
+message. A session is resumed with `droid --resume <id>`; since that fires
+no `SessionStart`, a live `droid --resume <id>` process also counts as
+running, so a second restore does not reopen it again.
+
+Measured on 2026-10-05 with Droid 0.231.0, using throwaway sessions run
+with `--settings` (a per-process settings file, so the user's config was
+not touched):
+
+- The payload is Claude's shape (`session_id`, `transcript_path`, `cwd`,
+  `hook_event_name`, `source`/`reason`), with no session title.
+- Every end is `other`: `/exit`, double Ctrl-C, a closed tmux window,
+  SIGHUP and SIGTERM. `/clear` ends the old id with `clear`, then again with
+  `other`.
+- The hook runs with no controlling terminal, but its parent, the `droid`
+  process, keeps one: at the end of `/exit` and Ctrl-C it still has its tty;
+  when the window is closed it has none (`??`), since the hangup comes first.
+- `SessionStart` fires on startup only: not after `--resume <id>` (which
+  keeps the id), nor for the session `/clear` starts. `UserPromptSubmit`
+  fires in both.
+- `/rename` fires no hook; it rewrites `title` in the transcript's first line
+  and sets `isSessionTitleManuallySet`.
+- `droid exec`, run in a terminal, fires both hooks with `TERM_PROGRAM` set;
+  only it sets `FACTORY_DISABLE_SETTINGS_PERSISTENCE` in the hook's
+  environment.
+- Hook commands are direct children of the `droid` process.
+
+A shutdown that sends SIGTERM to `droid` while its terminal is still open
+looks like `/exit`, and that session is forgotten. Quitting the terminal
+first, which is what a restart asks apps to do, hangs it up and keeps it.
+Unverified with a real reboot.
+
 ## Terminal adapters
 
 Every adapter takes the same layout: `--tab <label>`, then a directory and
@@ -125,9 +180,15 @@ directories it opened and the command each pane ran. CI installs tmux, and
 fails if it is missing. The Ghostty adapter needs a GUI session and is not
 run in tests.
 
-It also runs `install.sh` into a throwaway `HOME`, then the hook command
-exactly as the Claude adapter spells it, so a wrong path fails the test
-instead of silently recording nothing.
+Droid payloads are sent from a stand-in process named `droid`, with a
+terminal (`script`) or in a session of its own without one (`setsid`), since
+that is what separates `/exit` from a closed terminal.
+
+It also runs `install.sh` into a throwaway `HOME`, then the hook commands
+exactly as the Claude and Droid adapters spell them, so a wrong path fails
+the test instead of silently recording nothing. The Droid wiring is checked
+against a `settings.json` with hooks of its own: they are kept, the adapter's
+are added once, and uninstall restores the file.
 
 ## Spotlight app
 

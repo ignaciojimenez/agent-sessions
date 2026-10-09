@@ -29,6 +29,7 @@ away ([extending](docs/design.md#extending)).
 | Agent CLI | |
 |---|---|
 | Claude Code | sessions recorded by its `SessionStart`/`SessionEnd` hooks, resumed by id |
+| Droid (Factory) | sessions recorded by its `SessionStart`/`UserPromptSubmit`/`SessionEnd` hooks, resumed by id |
 
 | Terminal | Layout | Platforms |
 |---|---|---|
@@ -52,7 +53,9 @@ cd agent-sessions && ./install.sh
 
 `install.sh` links the tool into `~/.local/bin` as `agent-sessions` and
 `agent-restore`, wires the adapter of each agent CLI it finds, and on macOS
-builds the **Agent Restore** app. Every link points into the clone, so
+builds the **Agent Restore** app. For Droid, that means adding its three hooks
+to `~/.factory/settings.json` (or `~/.factory/hooks.json`, if you have one);
+the hooks already there are kept. Every link points into the clone, so
 `git pull` updates it, and `./install.sh --uninstall` removes it all.
 Restart running agent sessions afterwards so they load the hooks.
 
@@ -71,7 +74,8 @@ Ghostty on macOS, otherwise `print`. Set `AGENT_SESSIONS_TERMINAL` to change
 the default.
 
 Named sessions make the plan easier to read (in Claude Code: `claude -n
-<name>`, or `/rename`); unnamed ones you worked in are reopened too.
+<name>`, or `/rename`; in Droid: `/rename`); unnamed ones you worked in are
+reopened too.
 
 On macOS, **Agent Restore** in Spotlight shows the same plan in a dialog and
 reopens in Ghostty. The first run asks for permission to control Ghostty.
@@ -89,7 +93,7 @@ pruned after 14 days.
 
 ```
 agent-sessions       the tool: records sessions, plans and reopens them
-adapters/<agent>/    hook wiring for one agent CLI
+adapters/<agent>/    hooks for one agent CLI (claude, droid)
 macos/               source of the Spotlight app, compiled by install.sh
 install.sh           installs the tool, the adapters and the app
 tests/contract.sh    contract tests: real hook payloads, terminals, install

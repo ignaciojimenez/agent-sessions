@@ -2,6 +2,13 @@
 
 One-liners, newest first. The reasoning for each lives in `design.md`.
 
+- **2026-10-05 — Droid is the second agent adapter; its hooks are merged
+  into the user's settings.** Droid loads plugins only from a marketplace,
+  the route already dropped for Claude, so `install.sh` edits the active
+  user hooks file instead, and never creates a `hooks.json` that would hide
+  the hooks in `settings.json`. Droid ends `/exit` and a reboot with the same
+  reason, so whether the agent still holds its terminal decides which it was.
+
 - **2026-10-04 — Terminals are adapters too, and tmux is the portable one.**
   Ghostty keeps its native layout; tmux covers Linux and every terminal
   without an adapter; `print` is the fallback. Detection picks only the

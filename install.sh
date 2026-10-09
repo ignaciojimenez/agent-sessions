@@ -10,6 +10,8 @@
 #   ~/.local/bin/agent-sessions      -> ./agent-sessions
 #   ~/.local/bin/agent-restore       -> ./agent-sessions  (run under this name, it restores)
 #   ~/.claude/skills/agent-sessions  -> ./adapters/claude (when ~/.claude exists)
+#   ~/.factory/settings.json            + the hooks in ./adapters/droid (when
+#                                       ~/.factory exists; hooks.json if it has one)
 #   ~/Applications/Agent Restore.app    built from ./macos (macOS): agent-restore
 #                                       for Spotlight
 #
@@ -24,6 +26,8 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
 # Fixed, not configurable: the adapters' hook commands name this path.
 BIN="$HOME/.local/bin"
 APP="$HOME/Applications/Agent Restore.app"
+FACTORY="$HOME/.factory"
+DROID_HOOKS="$ROOT/adapters/droid/hooks.json"
 # The source the app was compiled from. Marks the app as built here, and tells
 # a re-run whether it is current.
 STAMP="Contents/Resources/agent-restore.applescript"
@@ -48,6 +52,45 @@ unlink_ours() {  # <link>
   to=$(readlink "$1")
   [[ "$to" == "$ROOT" || "$to" == "$ROOT"/* ]] || return 0
   rm -f "$1" && say "removed $(tilde "$1")"
+}
+
+# Droid has no plugin folder it loads unasked, so its hooks go into the user
+# hooks file. That is ~/.factory/hooks.json if there is one; without it,
+# Droid reads the hooks key of settings.json, and creating hooks.json would
+# hide every hook declared there.
+droid_hooks() {  # install|uninstall
+  local file path old new
+  if [[ -f "$FACTORY/hooks.json" || ! -f "$FACTORY/settings.json" ]]; then
+    file="$FACTORY/hooks.json" path='[]'
+  else
+    file="$FACTORY/settings.json" path='["hooks"]'
+  fi
+  [[ -f "$file" || "$1" == install ]] || return 0
+  old=$(if [[ -f "$file" ]]; then cat "$file"; else echo '{}'; fi)
+  # Every group running our command is dropped, then the adapter's appended,
+  # so a re-run changes nothing and uninstall leaves the others as they were.
+  new=$(jq --argjson p "$path" --slurpfile ours "$DROID_HOOKS" --arg mode "$1" '
+    ($ours[0] | [.[][].hooks[].command] | unique) as $cmds
+    | (getpath($p) // {}
+       | map_values(map(select(all(.hooks[]?; .command as $c | $cmds | index($c) | not))))
+       | reduce ($ours[0] | keys[]) as $k (.; if .[$k] == [] then del(.[$k]) else . end)
+       | if $mode == "install"
+         then reduce ($ours[0] | to_entries[]) as $e (.; .[$e.key] += $e.value)
+         else . end) as $hooks
+    | if $p != [] and $hooks == {} then delpaths([$p]) else setpath($p; $hooks) end
+  ' <<<"$old") || { say "error   could not read $(tilde "$file")"; problems=$((problems + 1)); return 0; }
+
+  if [[ "$(jq -S . <<<"$old")" == "$(jq -S . <<<"$new")" ]]; then
+    [[ "$1" == install ]] && say "current $(tilde "$file") (Droid hooks)"
+    return 0
+  fi
+  # Written in place, so a settings file that is a link, or has its own
+  # mode, stays that way.
+  mkdir -p "$FACTORY" && printf '%s\n' "$new" >"$file" || {
+    say "error   could not write $(tilde "$file")"; problems=$((problems + 1)); return 0; }
+  if [[ "$1" == install ]]; then say "wired   $(tilde "$file") (Droid hooks)"
+  else say "removed Droid hooks from $(tilde "$file")"
+  fi
 }
 
 as_string() {  # <text>: escaped for an AppleScript string literal
@@ -92,6 +135,7 @@ case "${1:-}" in
     unlink_ours "$BIN/agent-sessions"
     unlink_ours "$BIN/agent-restore"
     unlink_ours "$HOME/.claude/skills/agent-sessions"
+    [[ -d "$FACTORY" ]] && droid_hooks uninstall
     if [[ -f "$APP/$STAMP" ]]; then rm -rf "$APP" && say "removed $(tilde "$APP")"; fi
     exit 0
     ;;
@@ -110,6 +154,11 @@ if [[ -d "$HOME/.claude" ]]; then
   link "$ROOT/adapters/claude" "$HOME/.claude/skills/agent-sessions"
 else
   say "skip    Claude Code adapter (no ~/.claude)"
+fi
+if [[ -d "$FACTORY" ]]; then
+  droid_hooks install
+else
+  say "skip    Droid adapter (no ~/.factory)"
 fi
 
 build_app

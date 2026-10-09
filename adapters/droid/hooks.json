@@ -1,0 +1,11 @@
+{
+  "SessionStart": [
+    { "hooks": [{ "type": "command", "command": "\"$HOME/.local/bin/agent-sessions\" track droid" }] }
+  ],
+  "UserPromptSubmit": [
+    { "hooks": [{ "type": "command", "command": "\"$HOME/.local/bin/agent-sessions\" track droid" }] }
+  ],
+  "SessionEnd": [
+    { "hooks": [{ "type": "command", "command": "\"$HOME/.local/bin/agent-sessions\" track droid" }] }
+  ]
+}

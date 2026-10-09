@@ -2,8 +2,8 @@
 #
 # Contract test for agent-sessions, its terminal adapters, and install.sh.
 #
-# Replays hook payloads shaped exactly like the ones Claude Code 2.1.27x sends
-# (captured live — see docs/design.md) into a throwaway state dir,
+# Replays hook payloads shaped exactly like the ones Claude Code 2.1.27x and
+# Droid 0.231.0 send (captured live — see docs/design.md) into a throwaway state dir,
 # with a fixed clock, then asserts on the records and on the restore plan.
 # No network, no real sessions; tmux runs on a private server. Runs on macOS
 # and Linux.
@@ -12,14 +12,16 @@ set -uo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
 BIN="${AGENT_SESSIONS_BIN:-$ROOT/agent-sessions}"
-T="$(mktemp -d -t agent-sessions-test.XXXXXX)"
+# Resolved: a pane's shell reports its directory without symlinks, and on
+# macOS $TMPDIR is usually under /var, a link to /private/var.
+T="$(cd "$(mktemp -d -t agent-sessions-test.XXXXXX)" && pwd -P)"
 # tmux's socket path must fit a sockaddr (104 bytes on macOS); $TMPDIR may not.
 TM="$(mktemp -d /tmp/as-tmux.XXXXXX)"
-FAKE_PID=""
-trap '[[ -n "$FAKE_PID" ]] && kill "$FAKE_PID" 2>/dev/null; tmux_ kill-server 2>/dev/null; rm -rf "$T" "$TM"' EXIT
+FAKE_PID="" FAKE_DROID=""
+trap 'kill $FAKE_PID $FAKE_DROID 2>/dev/null; tmux_ kill-server 2>/dev/null; rm -rf "$T" "$TM"' EXIT
 
 export AGENT_SESSIONS_STATE="$T/state" TERM_PROGRAM=test CLAUDE_CODE_ENTRYPOINT=cli
-unset TMUX AGENT_SESSIONS_TERMINAL
+unset TMUX AGENT_SESSIONS_TERMINAL FACTORY_DISABLE_SETTINGS_PERSISTENCE
 PASS=0 FAIL=0
 check() {  # <description> <command...>
   local desc=$1; shift
@@ -198,10 +200,98 @@ else
   echo "  - tmux not installed: tmux adapter not tested"
 fi
 
+# Droid, in its own state dir. Its hooks run as children of the agent, and
+# whether that agent still holds a terminal is what tells /exit from a closed
+# terminal, so each payload is sent from a stand-in named droid, with or
+# without a terminal of its own (docs/design.md).
+MAIN_STATE=$AGENT_SESSIONS_STATE
+export AGENT_SESSIONS_STATE="$T/state-droid"
+ln -s "$(command -v bash)" "$T/bin/droid"
+drecord() { [[ -f "$AGENT_SESSIONS_STATE/droid-$1.json" ]]; }
+with_tty() {
+  if [[ "$(uname -s)" == Darwin ]]; then script -q /dev/null "$@"
+  else script -qec "$(printf '%q ' "$@")" /dev/null
+  fi </dev/null >/dev/null
+}
+# A new session, so the stand-in has no controlling terminal to inherit.
+without_tty() { perl -MPOSIX -e 'POSIX::setsid(); exec @ARGV or die "exec: $!"' "$@"; }
+# dhook <at> tty|notty <event> <id> [reason]
+dhook() {
+  local -x AGENT_SESSIONS_NOW=$1
+  local payload="$T/payload-$4.json" agent
+  jq -n --arg e "$3" --arg id "$4" --arg r "${5:-}" --arg cwd "$T/repo" \
+        --arg tp "$T/transcripts/$4.jsonl" \
+    '{session_id: $id, transcript_path: $tp, cwd: $cwd, permission_mode: "off",
+      hook_event_name: $e}
+     + (if $e == "SessionStart" then {source: "startup"} else {} end)
+     + (if $r == "" then {} else {reason: $r, message_count: 1} end)' >"$payload"
+  # The trailing `:` keeps bash from exec-ing the tool in its own place.
+  agent=("$T/bin/droid" -c '"$0" track droid <"$1"; :' "$BIN" "$payload")
+  if [[ "$2" == tty ]]; then with_tty "${agent[@]}"; else without_tty "${agent[@]}"; fi
+}
+dtranscript() {  # <id> <title> <manually set: true|false> — with one answer in it
+  jq -nc --arg id "$1" --arg t "$2" --argjson m "$3" \
+    '{type: "session_start", id: $id, title: $t, isSessionTitleManuallySet: $m}' \
+    >"$T/transcripts/$1.jsonl"
+  jq -nc '{type: "message", message: {role: "assistant", content: []}}' >>"$T/transcripts/$1.jsonl"
+}
+
+dhook 5000 notty SessionStart dddddddd-0001
+check "droid: a session is recorded" drecord dddddddd-0001
+check "droid: the agent's pid is recorded" \
+  test "$(jq -r '.pid | type' "$AGENT_SESSIONS_STATE/droid-dddddddd-0001.json")" = number
+dhook 5010 tty SessionEnd dddddddd-0001 other
+check "droid: an exit that leaves the terminal open forgets it" eval '! drecord dddddddd-0001'
+
+dhook 5000 notty SessionStart dddddddd-0002; dtranscript dddddddd-0002 "droid-renamed" true
+dhook 9000 notty SessionEnd dddddddd-0002 other
+check "droid: a closed terminal keeps it, with when it ended" \
+  test "$(jq .ended_at "$AGENT_SESSIONS_STATE/droid-dddddddd-0002.json")" = 9000
+
+dhook 5000 notty SessionStart dddddddd-0003; dhook 6000 notty SessionEnd dddddddd-0003 clear
+check "droid: /clear forgets the old id" eval '! drecord dddddddd-0003'
+
+FACTORY_DISABLE_SETTINGS_PERSISTENCE=1 dhook 5000 notty SessionStart dddddddd-0004
+check "droid: a headless run (droid exec) is not recorded" eval '! drecord dddddddd-0004'
+TERM_PROGRAM="" dhook 5000 notty SessionStart dddddddd-0005
+check "droid: a session without a terminal is not recorded" eval '! drecord dddddddd-0005'
+
+# Resumed: Droid fires no SessionStart, so the first prompt records it, or,
+# when there was none, its end.
+dhook 6000 notty UserPromptSubmit dddddddd-0006; dtranscript dddddddd-0006 "prompted" true
+check "droid: a resumed session is recorded on its first prompt" drecord dddddddd-0006
+dhook 9050 notty SessionEnd eeeeeeee-0007 other
+dtranscript eeeeeeee-0007 "Fix the flaky test in the payment service" false
+check "droid: a resumed session closed unprompted is recorded at its end" drecord eeeeeeee-0007
+
+dhook 5000 notty SessionStart "../../escape" 2>/dev/null
+check "droid: hostile ids write nothing" \
+  test "$(find "$T" -name '*escape*' ! -name 'payload-*' | wc -l | tr -d ' ')" = 0
+
+plan=$(AGENT_SESSIONS_NOW=9200 "$BIN" restore -t print)
+check "droid: plan uses the name set by /rename" has "$plan" "droid-renamed"
+check "droid: plan reopens a lost session" has "$plan" "prompted"
+check "droid: a title Droid made up is not a name" has "$plan" "(unnamed eeeeeeee)"
+check "droid: plan resumes by id" has "$plan" "cd $T/repo && droid --resume dddddddd-0002"
+check "droid: plan opens all three" has "$plan" "3 session(s) in 1 tab(s),"
+
+# Reopened by restore, not yet prompted: running, found by its command line.
+mkdir -p "$T/stub-droid" && printf '#!/bin/sh\nsleep 60\n' >"$T/stub-droid/droid" && chmod +x "$T/stub-droid/droid"
+"$T/stub-droid/droid" --resume dddddddd-0002 & FAKE_DROID=$! && disown
+check "droid: a session resumed by command is running" \
+  has "$(AGENT_SESSIONS_NOW=9200 "$BIN" list)" "running  droid   droid-renamed"
+check "droid: a second restore leaves it alone" \
+  hasnt "$(AGENT_SESSIONS_NOW=9200 "$BIN" restore -n)" "droid-renamed"
+kill "$FAKE_DROID" 2>/dev/null
+export AGENT_SESSIONS_STATE=$MAIN_STATE
+
 # Install, into a throwaway HOME: the links, the hook command exactly as the
 # Claude adapter spells it (a wrong path there records nothing, silently, in
 # every session), agent-restore, and uninstall.
-H="$T/home"; mkdir -p "$H/.claude"
+H="$T/home"; mkdir -p "$H/.claude" "$H/.factory"
+guard='{"matcher": "Execute", "hooks": [{"type": "command", "command": "guard"}]}'
+jq -n --argjson g "$guard" '{model: "m", hooks: {PreToolUse: [$g]}}' >"$H/.factory/settings.json"
+HOME="$H" "$ROOT/install.sh" >/dev/null
 HOME="$H" "$ROOT/install.sh" >/dev/null
 check "install links agent-sessions" test "$(readlink "$H/.local/bin/agent-sessions")" = "$ROOT/agent-sessions"
 check "install links agent-restore" test "$(readlink "$H/.local/bin/agent-restore")" = "$ROOT/agent-sessions"
@@ -216,6 +306,27 @@ jq -n --arg tp "$T/transcripts/cccccccc-0001.jsonl" --arg cwd "$T/repo" \
     hook_event_name: "SessionStart", source: "startup", session_title: "hooked"}' |
   HOME="$H" AGENT_SESSIONS_NOW=9300 sh -c "$hook"
 check "the Claude adapter's hook command records a session" record cccccccc-0001
+
+settings="$H/.factory/settings.json"
+dcmd=$(jq -r '.SessionStart[0].hooks[0].command' "$ROOT/adapters/droid/hooks.json")
+check "install wires the Droid hooks into settings.json, once" \
+  test "$(jq --arg c "$dcmd" '[.hooks[][] | select(.hooks[0].command == $c)] | length' "$settings")" = 3
+check "every Droid hook runs the same command" \
+  test "$(jq '[.[][].hooks[].command] | unique | length' "$ROOT/adapters/droid/hooks.json")" = 1
+check "the hooks already there are kept" \
+  test "$(jq -c '[.model, .hooks.PreToolUse]' "$settings")" = "$(jq -nc --argjson g "$guard" '["m", [$g]]')"
+check "no hooks.json is created to shadow settings.json" test ! -e "$H/.factory/hooks.json"
+jq -n --arg tp "$T/transcripts/cccccccc-0002.jsonl" --arg cwd "$T/repo" \
+  '{session_id: "cccccccc-0002", transcript_path: $tp, cwd: $cwd,
+    hook_event_name: "SessionStart", source: "startup"}' |
+  HOME="$H" AGENT_SESSIONS_NOW=9300 sh -c "$(jq -r '.hooks.SessionStart[-1].hooks[0].command' "$settings")"
+check "the Droid adapter's hook command records a session" \
+  test -f "$AGENT_SESSIONS_STATE/droid-cccccccc-0002.json"
+H4="$T/home4"; mkdir -p "$H4/.factory"; echo '{}' >"$H4/.factory/hooks.json"
+jq -n --argjson g "$guard" '{hooks: {PreToolUse: [$g]}}' >"$H4/.factory/settings.json"
+HOME="$H4" "$ROOT/install.sh" >/dev/null
+check "a hooks.json, when there is one, is where Droid hooks go" \
+  test "$(jq 'keys | length' "$H4/.factory/hooks.json")-$(jq '.hooks | keys | length' "$H4/.factory/settings.json")" = 3-1
 plan=$(AGENT_SESSIONS_NOW=9400 "$H/.local/bin/agent-restore" -n)
 check "agent-restore prints a plan" has "$plan" "session(s) in"
 check "agent-restore is restore" test "$plan" = "$(AGENT_SESSIONS_NOW=9400 "$BIN" restore -n)"
@@ -254,6 +365,8 @@ HOME="$H" "$ROOT/install.sh" --uninstall >/dev/null
 check "uninstall removes every link" \
   test -z "$(find "$H/.local/bin" "$H/.claude/skills" -type l)"
 check "uninstall removes the app it built" test ! -e "$H/Applications/Agent Restore.app"
+check "uninstall removes the Droid hooks, and only them" \
+  test "$(jq -c . "$settings")" = "$(jq -nc --argjson g "$guard" '{model: "m", hooks: {PreToolUse: [$g]}}')"
 
 # Past the retention window: pruned on read. Last, since the clock jump
 # prunes everything else too.
