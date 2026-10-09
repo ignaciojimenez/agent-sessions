@@ -27,31 +27,48 @@ check() {  # <description> <command...>
   local desc=$1; shift
   if "$@"; then PASS=$((PASS + 1)); else FAIL=$((FAIL + 1)); echo "  ✗ $desc"; return 1; fi
 }
-has()    { grep -qF -- "$2" <<<"$1"; }
-hasnt()  { ! grep -qF -- "$2" <<<"$1"; }
-record() { [[ -f "$AGENT_SESSIONS_STATE/claude-$1.json" ]]; }
-tmux_()  { TMUX_TMPDIR="$TM" tmux "$@"; }  # a private tmux server
+has()      { grep -qF -- "$2" <<<"$1"; }
+hasnt()    { ! grep -qF -- "$2" <<<"$1"; }
+recorded() { [[ -f "$AGENT_SESSIONS_STATE/$1-$2.json" ]]; }  # <tool> <id>
+tmux_()    { TMUX_TMPDIR="$TM" tmux "$@"; }  # a private tmux server
 
-mkdir -p "$T/repo/sub" "$T/repo2" "$T/transcripts"
+mkdir -p "$T/repo/sub" "$T/repo2" "$T/transcripts" "$T/agents"
 git -C "$T/repo" init -q && git -C "$T/repo2" init -q
 
-# start <at> <id> <title> [cwd] [source]   end <at> <id> <reason>
+# hook <tool> <at> <payload>: sent the way the CLI runs its hooks, from the
+# agent's own process (a stand-in named after it), with no terminal unless
+# TTY=1. Whether the agent holds a terminal is part of what an adapter reads.
+for tool in claude droid; do ln -s "$(command -v bash)" "$T/agents/$tool"; done
+hook() {
+  local payload="$T/payload.json" agent
+  printf '%s\n' "$3" >"$payload"
+  # The trailing `:` keeps bash from exec-ing the tool in its own place.
+  agent=("$T/agents/$1" -c '"$0" track "$1" <"$2"; :' "$BIN" "$1" "$payload")
+  if [[ "${TTY:-}" == 1 ]]; then
+    if [[ "$(uname -s)" == Darwin ]]; then AGENT_SESSIONS_NOW=$2 script -q /dev/null "${agent[@]}"
+    else AGENT_SESSIONS_NOW=$2 script -qec "$(printf '%q ' "${agent[@]}")" /dev/null
+    fi </dev/null >/dev/null
+  else
+    # A session of its own, so there is no terminal to inherit.
+    AGENT_SESSIONS_NOW=$2 perl -MPOSIX -e 'POSIX::setsid(); exec @ARGV or die "exec: $!"' "${agent[@]}"
+  fi
+}
+
+# Claude Code: start <at> <id> <title> [cwd] [source]   end <at> <id> <reason>
 start() {
-  jq -n --arg id "$2" --arg title "$3" --arg cwd "${4:-$T/repo}" \
+  hook claude "$1" "$(jq -n --arg id "$2" --arg title "$3" --arg cwd "${4:-$T/repo}" \
         --arg src "${5:-startup}" --arg tp "$T/transcripts/$2.jsonl" \
     '{session_id: $id, transcript_path: $tp, cwd: $cwd,
       scratchpad_dir: "/tmp/x", hook_event_name: "SessionStart",
       source: $src, model: "claude-opus-5"}
-     + (if $title == "" then {} else {session_title: $title} end)' |
-    AGENT_SESSIONS_NOW=$1 "$BIN" track claude
+     + (if $title == "" then {} else {session_title: $title} end)')"
 }
 end() {
-  jq -n --arg id "$2" --arg reason "$3" --arg cwd "$T/repo" \
+  hook claude "$1" "$(jq -n --arg id "$2" --arg reason "$3" --arg cwd "$T/repo" \
         --arg tp "$T/transcripts/$2.jsonl" \
     '{session_id: $id, transcript_path: $tp, cwd: $cwd,
       scratchpad_dir: "/tmp/x", prompt_id: "p", hook_event_name: "SessionEnd",
-      reason: $reason}' |
-    AGENT_SESSIONS_NOW=$1 "$BIN" track claude
+      reason: $reason}')"
 }
 transcript() {  # <id> [title...] — one custom-title record per rename
   local id=$1 t; shift
@@ -70,12 +87,12 @@ echo "agent-sessions contract"
 
 # Closed on purpose: forgotten.
 start 1000 aaaaaaaa-0001 "exited"; end 1010 aaaaaaaa-0001 prompt_input_exit
-check "/exit forgets the session" eval '! record aaaaaaaa-0001'
+check "/exit forgets the session" eval '! recorded claude aaaaaaaa-0001'
 
 # "other" (terminal closed, signal, reboot): kept as closed.
 start 5000 aaaaaaaa-0002 "alpha"; end 9000 aaaaaaaa-0002 other
 transcript aaaaaaaa-0002 "alpha" "alpha-renamed"
-check "'other' keeps the session" record aaaaaaaa-0002
+check "'other' keeps the session" recorded claude aaaaaaaa-0002
 check "'other' records when it ended" \
   test "$(jq .ended_at "$AGENT_SESSIONS_STATE/claude-aaaaaaaa-0002.json")" = 9000
 
@@ -83,8 +100,8 @@ check "'other' records when it ended" \
 start 5000 aaaaaaaa-0003 "zeta"; end 6000 aaaaaaaa-0003 clear
 start 6000 aaaaaaaa-0004 "zeta" "$T/repo" clear; end 9100 aaaaaaaa-0004 other
 transcript aaaaaaaa-0004
-check "/clear forgets the old id" eval '! record aaaaaaaa-0003'
-check "/clear records the new id" record aaaaaaaa-0004
+check "/clear forgets the old id" eval '! recorded claude aaaaaaaa-0003'
+check "/clear records the new id" recorded claude aaaaaaaa-0004
 
 # A session in a subdirectory, and one in a second repo.
 start 5000 aaaaaaaa-0005 "beta" "$T/repo/sub"; end 9050 aaaaaaaa-0005 other
@@ -115,11 +132,11 @@ start 5000 aaaaaaaa-0011 "theta"; end 9000 aaaaaaaa-0011 other
 
 # No terminal (`claude --bg`): never recorded.
 TERM_PROGRAM="" start 5000 aaaaaaaa-0012 "background"
-check "a session without a terminal is not recorded" eval '! record aaaaaaaa-0012'
+check "a session without a terminal is not recorded" eval '! recorded claude aaaaaaaa-0012'
 
 # Headless (`claude -p` from a terminal): never recorded either.
 CLAUDE_CODE_ENTRYPOINT=sdk-cli start 5000 aaaaaaaa-0015 "headless"
-check "a headless session is not recorded" eval '! record aaaaaaaa-0015'
+check "a headless session is not recorded" eval '! recorded claude aaaaaaaa-0015'
 
 # Ids that could escape the state dir or become a shell option are refused.
 start 5000 "../../escape" "evil" 2>/dev/null
@@ -200,34 +217,17 @@ else
   echo "  - tmux not installed: tmux adapter not tested"
 fi
 
-# Droid, in its own state dir. Its hooks run as children of the agent, and
-# whether that agent still holds a terminal is what tells /exit from a closed
-# terminal, so each payload is sent from a stand-in named droid, with or
-# without a terminal of its own (docs/design.md).
+# Droid, in its own state dir. Every end is "other", so whether the agent
+# still holds its terminal is what tells /exit from a closed one.
 MAIN_STATE=$AGENT_SESSIONS_STATE
 export AGENT_SESSIONS_STATE="$T/state-droid"
-ln -s "$(command -v bash)" "$T/bin/droid"
-drecord() { [[ -f "$AGENT_SESSIONS_STATE/droid-$1.json" ]]; }
-with_tty() {
-  if [[ "$(uname -s)" == Darwin ]]; then script -q /dev/null "$@"
-  else script -qec "$(printf '%q ' "$@")" /dev/null
-  fi </dev/null >/dev/null
-}
-# A new session, so the stand-in has no controlling terminal to inherit.
-without_tty() { perl -MPOSIX -e 'POSIX::setsid(); exec @ARGV or die "exec: $!"' "$@"; }
-# dhook <at> tty|notty <event> <id> [reason]
-dhook() {
-  local -x AGENT_SESSIONS_NOW=$1
-  local payload="$T/payload-$4.json" agent
-  jq -n --arg e "$3" --arg id "$4" --arg r "${5:-}" --arg cwd "$T/repo" \
-        --arg tp "$T/transcripts/$4.jsonl" \
+dhook() {  # <at> <event> <id> [reason]
+  hook droid "$1" "$(jq -n --arg e "$2" --arg id "$3" --arg r "${4:-}" --arg cwd "$T/repo" \
+        --arg tp "$T/transcripts/$3.jsonl" \
     '{session_id: $id, transcript_path: $tp, cwd: $cwd, permission_mode: "off",
       hook_event_name: $e}
      + (if $e == "SessionStart" then {source: "startup"} else {} end)
-     + (if $r == "" then {} else {reason: $r, message_count: 1} end)' >"$payload"
-  # The trailing `:` keeps bash from exec-ing the tool in its own place.
-  agent=("$T/bin/droid" -c '"$0" track droid <"$1"; :' "$BIN" "$payload")
-  if [[ "$2" == tty ]]; then with_tty "${agent[@]}"; else without_tty "${agent[@]}"; fi
+     + (if $r == "" then {} else {reason: $r, message_count: 1} end)')"
 }
 dtranscript() {  # <id> <title> <manually set: true|false> — with one answer in it
   jq -nc --arg id "$1" --arg t "$2" --argjson m "$3" \
@@ -236,37 +236,37 @@ dtranscript() {  # <id> <title> <manually set: true|false> — with one answer i
   jq -nc '{type: "message", message: {role: "assistant", content: []}}' >>"$T/transcripts/$1.jsonl"
 }
 
-dhook 5000 notty SessionStart dddddddd-0001
-check "droid: a session is recorded" drecord dddddddd-0001
+dhook 5000 SessionStart dddddddd-0001
+check "droid: a session is recorded" recorded droid dddddddd-0001
 check "droid: the agent's pid is recorded" \
   test "$(jq -r '.pid | type' "$AGENT_SESSIONS_STATE/droid-dddddddd-0001.json")" = number
-dhook 5010 tty SessionEnd dddddddd-0001 other
-check "droid: an exit that leaves the terminal open forgets it" eval '! drecord dddddddd-0001'
+TTY=1 dhook 5010 SessionEnd dddddddd-0001 other
+check "droid: an exit that leaves the terminal open forgets it" eval '! recorded droid dddddddd-0001'
 
-dhook 5000 notty SessionStart dddddddd-0002; dtranscript dddddddd-0002 "droid-renamed" true
-dhook 9000 notty SessionEnd dddddddd-0002 other
+dhook 5000 SessionStart dddddddd-0002; dtranscript dddddddd-0002 "droid-renamed" true
+dhook 9000 SessionEnd dddddddd-0002 other
 check "droid: a closed terminal keeps it, with when it ended" \
   test "$(jq .ended_at "$AGENT_SESSIONS_STATE/droid-dddddddd-0002.json")" = 9000
 
-dhook 5000 notty SessionStart dddddddd-0003; dhook 6000 notty SessionEnd dddddddd-0003 clear
-check "droid: /clear forgets the old id" eval '! drecord dddddddd-0003'
+dhook 5000 SessionStart dddddddd-0003; dhook 6000 SessionEnd dddddddd-0003 clear
+check "droid: /clear forgets the old id" eval '! recorded droid dddddddd-0003'
 
-FACTORY_DISABLE_SETTINGS_PERSISTENCE=1 dhook 5000 notty SessionStart dddddddd-0004
-check "droid: a headless run (droid exec) is not recorded" eval '! drecord dddddddd-0004'
-TERM_PROGRAM="" dhook 5000 notty SessionStart dddddddd-0005
-check "droid: a session without a terminal is not recorded" eval '! drecord dddddddd-0005'
+FACTORY_DISABLE_SETTINGS_PERSISTENCE=1 dhook 5000 SessionStart dddddddd-0004
+check "droid: a headless run (droid exec) is not recorded" eval '! recorded droid dddddddd-0004'
+TERM_PROGRAM="" dhook 5000 SessionStart dddddddd-0005
+check "droid: a session without a terminal is not recorded" eval '! recorded droid dddddddd-0005'
 
 # Resumed: Droid fires no SessionStart, so the first prompt records it, or,
 # when there was none, its end.
-dhook 6000 notty UserPromptSubmit dddddddd-0006; dtranscript dddddddd-0006 "prompted" true
-check "droid: a resumed session is recorded on its first prompt" drecord dddddddd-0006
-dhook 9050 notty SessionEnd eeeeeeee-0007 other
+dhook 6000 UserPromptSubmit dddddddd-0006; dtranscript dddddddd-0006 "prompted" true
+check "droid: a resumed session is recorded on its first prompt" recorded droid dddddddd-0006
+dhook 9050 SessionEnd eeeeeeee-0007 other
 dtranscript eeeeeeee-0007 "Fix the flaky test in the payment service" false
-check "droid: a resumed session closed unprompted is recorded at its end" drecord eeeeeeee-0007
+check "droid: a resumed session closed unprompted is recorded at its end" recorded droid eeeeeeee-0007
 
-dhook 5000 notty SessionStart "../../escape" 2>/dev/null
+dhook 5000 SessionStart "../../escape" 2>/dev/null
 check "droid: hostile ids write nothing" \
-  test "$(find "$T" -name '*escape*' ! -name 'payload-*' | wc -l | tr -d ' ')" = 0
+  test "$(find "$T" -name '*escape*' | wc -l | tr -d ' ')" = 0
 
 plan=$(AGENT_SESSIONS_NOW=9200 "$BIN" restore -t print)
 check "droid: plan uses the name set by /rename" has "$plan" "droid-renamed"
@@ -305,7 +305,7 @@ jq -n --arg tp "$T/transcripts/cccccccc-0001.jsonl" --arg cwd "$T/repo" \
   '{session_id: "cccccccc-0001", transcript_path: $tp, cwd: $cwd,
     hook_event_name: "SessionStart", source: "startup", session_title: "hooked"}' |
   HOME="$H" AGENT_SESSIONS_NOW=9300 sh -c "$hook"
-check "the Claude adapter's hook command records a session" record cccccccc-0001
+check "the Claude adapter's hook command records a session" recorded claude cccccccc-0001
 
 settings="$H/.factory/settings.json"
 dcmd=$(jq -r '.SessionStart[0].hooks[0].command' "$ROOT/adapters/droid/hooks.json")
@@ -372,7 +372,7 @@ check "uninstall removes the Droid hooks, and only them" \
 # prunes everything else too.
 start 100 aaaaaaaa-0013 "ancient"; end 200 aaaaaaaa-0013 other
 AGENT_SESSIONS_NOW=$((200 + 15 * 86400)) "$BIN" list >/dev/null
-check "records older than 14 days are pruned" eval '! record aaaaaaaa-0013'
+check "records older than 14 days are pruned" eval '! recorded claude aaaaaaaa-0013'
 
 echo "  $PASS passed, $FAIL failed"
 [[ "$FAIL" -eq 0 ]]

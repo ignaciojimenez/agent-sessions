@@ -180,9 +180,10 @@ directories it opened and the command each pane ran. CI installs tmux, and
 fails if it is missing. The Ghostty adapter needs a GUI session and is not
 run in tests.
 
-Droid payloads are sent from a stand-in process named `droid`, with a
-terminal (`script`) or in a session of its own without one (`setsid`), since
-that is what separates `/exit` from a closed terminal.
+Every payload is sent the way the CLI runs its hooks: from a stand-in
+process named after the agent, in a session of its own without a terminal
+(`setsid`), or with one (`script`), since for Droid that is what separates
+`/exit` from a closed terminal.
 
 It also runs `install.sh` into a throwaway `HOME`, then the hook commands
 exactly as the Claude and Droid adapters spell them, so a wrong path fails
@@ -223,14 +224,19 @@ cold start from the app is untested.
 
 ## Extending
 
-**An agent CLI.** Everything agent-specific sits in the adapter block at
-the top of `agent-sessions`: `track_<tool>`, plus a case in
-`resume_command`, `resumable`, `worked_in` and `current_name`. Add an
-`adapters/<tool>/` folder that makes the CLI's hooks run
-`~/.local/bin/agent-sessions track <tool>`, and a line in `install.sh` that
-wires it where that CLI keeps its config. The CLI must be able to resume a
-session by id: Gemini CLI 0.18.4 resumes only by index or `latest`, so it
-cannot be supported yet.
+**An agent CLI.** Four things, none of them a change to shared code:
+
+| Where | What |
+|---|---|
+| `agent-sessions` | `<tool>_track`, `<tool>_resume`, `<tool>_name`, `<tool>_answered`, and optionally `<tool>_reopened`, in the adapter block |
+| `adapters/<tool>/` | whatever makes the CLI's hooks run `~/.local/bin/agent-sessions track <tool>` |
+| `install.sh` | `wire_<tool> install\|uninstall`, built from `symlink` or `merge_hooks`; one function for both, so they cannot drift apart |
+| `tests/contract.sh` | its payloads, sent with `hook <tool>`, and what they should record |
+
+`<tool>` is also the name of the CLI's executable: that is how a live
+session is told from a dead one. The CLI must be able to resume a session
+by id: Gemini CLI 0.18.4 resumes only by index or `latest`, so it cannot be
+supported yet.
 
 **A terminal.** Add an `open_<terminal>` function that takes the layout
 described above, and a rule in `detect_terminal` if it can be recognized

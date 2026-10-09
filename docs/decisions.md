@@ -2,6 +2,13 @@
 
 One-liners, newest first. The reasoning for each lives in `design.md`.
 
+- **2026-10-09 — An adapter is a set of functions named after its tool.**
+  `<tool>_track`, `_resume`, `_name`, `_answered` in the tool, and
+  `wire_<tool>` in `install.sh`, which installs and uninstalls with the same
+  code. Rules true of every agent, such as "no transcript, nothing to
+  resume", moved out of the adapters. Still one file each: loading adapters
+  from separate files waits for a third agent.
+
 - **2026-10-05 — Droid is the second agent adapter; its hooks are merged
   into the user's settings.** Droid loads plugins only from a marketplace,
   the route already dropped for Claude, so `install.sh` edits the active

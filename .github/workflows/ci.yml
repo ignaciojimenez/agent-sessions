@@ -43,4 +43,4 @@ jobs:
         with:
           persist-credentials: false
       - name: Adapter manifests parse
-        run: for f in adapters/*/.claude-plugin/*.json adapters/*/hooks/*.json adapters/*/hooks.json; do jq empty "$f"; done
+        run: find adapters -name '*.json' -exec jq empty {} +

@@ -27,77 +27,38 @@ die() { echo "agent-sessions: $*" >&2; exit 1; }
 now() { echo "${AGENT_SESSIONS_NOW:-$(date +%s)}"; }
 
 # ─── Agent adapters ──────────────────────────────────────────────────────────
-# Everything specific to one CLI lives here. Adding a CLI means wiring its
-# hooks to `agent-sessions track <tool>`, a track_<tool> that maps its hook
-# payload onto a record, and a case in each function below.
+# Everything specific to one CLI lives here, as functions named <tool>_<verb>.
+# <tool> is also the name of its executable, which is how a live session is
+# told from a dead one.
+#
+#   <tool>_track                 hook entry point: map the payload onto a record
+#   <tool>_resume <id>           the command that reopens a session
+#   <tool>_name <transcript>     the name it was given since it started, if any
+#   <tool>_answered <transcript> whether the agent ever answered in it
+#   <tool>_reopened <id>         optional: open again, though no hook said so
+#
+# Its hooks run `agent-sessions track <tool>` (adapters/<tool>/), and
+# install.sh wires them with wire_<tool>.
 
-resume_command() {  # <tool> <id>
-  case "$1" in
-    claude) printf 'claude --resume %s' "$2" ;;
-    droid) printf 'droid --resume %s' "$2" ;;
-    *) return 1 ;;
-  esac
+adapter() {  # <verb> <tool> [args...]: fails when the adapter has no such verb
+  local fn="$2_$1"; shift 2
+  declare -F "$fn" >/dev/null && "$fn" "$@"
 }
 
-# Claude can only resume a session that has a transcript, and one killed
-# before its first exchange may never have written one. Droid deletes the
-# transcript of a session nothing was said in.
-resumable() {  # <tool> <transcript>
-  case "$1" in
-    claude|droid) [[ -f "$2" ]] ;;
-    *) return 0 ;;
-  esac
-}
-
-# Whether the agent ever answered in it. Separates real work from a session
-# opened and closed again, which leaves a transcript of setup records and
-# local commands (/clear, /mcp) but no assistant turn.
-worked_in() {  # <tool> <transcript>
-  case "$1" in
-    claude) [[ -f "$2" ]] && grep -qF '"type":"assistant"' "$2" ;;
-    droid) [[ -f "$2" ]] && grep -qF '"role":"assistant"' "$2" ;;
-    *) return 0 ;;
-  esac
-}
-
-# A session can be renamed after it starts (/rename) and no hook fires when
-# it is. Claude appends a custom-title record to the transcript on every
-# rename, so the last one is the current name. Droid rewrites the title in
-# the transcript's first line; one it made up from the first prompt is not
-# a name.
-current_name() {  # <tool> <transcript> <name recorded at start>
-  local latest=""
-  case "$1" in
-    claude)
-      [[ -f "$2" ]] && latest=$(grep -F '"type":"custom-title"' "$2" | tail -n 1 |
-                                jq -r '.customTitle // empty' 2>/dev/null)
-      ;;
-    droid)
-      [[ -f "$2" ]] && latest=$(head -n 1 "$2" |
-        jq -r 'select(.isSessionTitleManuallySet == true) | .title // empty' 2>/dev/null)
-      ;;
-  esac
-  printf '%s' "${latest:-$3}"
-}
-
-# Droid fires no SessionStart on --resume, so a session restore reopened
-# keeps its closed record until its first prompt. Its command line shows it
-# is open again.
-resumed() {  # <tool> <id>
-  case "$1" in
-    droid) pgrep -f -- "(^|/)droid --resume $2( |\$)" >/dev/null ;;
-    *) return 1 ;;
-  esac
-}
-
-# Claude Code SessionStart / SessionEnd payloads.
-track_claude() {
-  local fields event id reason cwd title transcript
+# Both CLIs send Claude Code's payload shape. Sets the caller's locals.
+read_hook() {
+  local fields
   fields=$(jq -r --arg s "$SEP" \
     '[.hook_event_name, .session_id, .reason, .cwd, .session_title, .transcript_path]
      | map(. // "") | join($s)') || die "unreadable hook payload"
   IFS="$SEP" read -r event id reason cwd title transcript <<<"$fields"
+}
 
+# ── Claude Code ──
+
+claude_track() {
+  local event id reason cwd title transcript
+  read_hook
   case "$event" in
     SessionStart)
       # `claude --bg` sessions have no terminal, so there is nothing to reopen.
@@ -121,27 +82,21 @@ track_claude() {
   esac
 }
 
-# Droid ends a session with "other" whether it was /exit, Ctrl-C, a closed
-# terminal or a reboot (measured, 0.231.0). The terminal tells them apart:
-# closing one hangs up its tty before the agent is signalled, so an agent
-# still holding its tty at the end was exited from inside it. Unknown when
-# the hook's parent is not the agent; then the session is kept.
-agent_holds_terminal() {  # <tool>
-  local pid tty
-  pid=$(agent_pid "$1") && [[ -n "$pid" ]] || return 1
-  tty=$(ps -o tty= -p "$pid" 2>/dev/null) || return 1
-  tty=${tty//[[:space:]]/}
-  [[ -n "$tty" && "$tty" != *'?'* ]]
+claude_resume() { printf 'claude --resume %s' "$1"; }
+
+# /rename fires no hook, but appends a custom-title record to the
+# transcript; the last one is the current name.
+claude_name() {
+  grep -F '"type":"custom-title"' "$1" | tail -n 1 | jq -r '.customTitle // empty' 2>/dev/null
 }
 
-# Droid SessionStart / UserPromptSubmit / SessionEnd payloads.
-track_droid() {
-  local fields event id reason cwd transcript file pid
-  fields=$(jq -r --arg s "$SEP" \
-    '[.hook_event_name, .session_id, .reason, .cwd, .transcript_path]
-     | map(. // "") | join($s)') || die "unreadable hook payload"
-  IFS="$SEP" read -r event id reason cwd transcript <<<"$fields"
+claude_answered() { grep -qF '"type":"assistant"' "$1"; }
 
+# ── Droid ──
+
+droid_track() {
+  local event id reason cwd title transcript pid file
+  read_hook
   # Nothing to reopen without a terminal, nor for a headless `droid exec`,
   # the only run that sets this (0.231.0).
   [[ -n "${TERM_PROGRAM:-}" && -z "${FACTORY_DISABLE_SETTINGS_PERSISTENCE:-}" ]] || return 0
@@ -158,6 +113,10 @@ track_droid() {
         record_start droid "$id" "" "$cwd" "$transcript"
       ;;
     SessionEnd)
+      # Every end is "other" — /exit, Ctrl-C, a closed terminal, a reboot
+      # (measured, 0.231.0) — so the terminal tells them apart: closing one
+      # hangs up its tty before the agent is signalled. An agent still
+      # holding its tty was exited from inside it.
       if [[ "$reason" != other ]] || agent_holds_terminal droid; then
         record_forget droid "$id"
       else
@@ -167,6 +126,20 @@ track_droid() {
       ;;
   esac
 }
+
+droid_resume() { printf 'droid --resume %s' "$1"; }
+
+# /rename rewrites the title in the transcript's first line. One Droid made
+# up from the first prompt is not a name.
+droid_name() {
+  head -n 1 "$1" | jq -r 'select(.isSessionTitleManuallySet == true) | .title // empty' 2>/dev/null
+}
+
+droid_answered() { grep -qF '"role":"assistant"' "$1"; }
+
+# --resume fires no SessionStart, so a session restore reopened keeps its
+# closed record until its first prompt. Its command line shows it is open.
+droid_reopened() { pgrep -f -- "(^|/)droid --resume $1( |\$)" >/dev/null; }
 
 # ─── Records ─────────────────────────────────────────────────────────────────
 # One JSON file per session, so concurrent hooks never contend for a file.
@@ -181,9 +154,19 @@ record_file() { echo "$STATE_DIR/$1-$2.json"; }
 # 2.1.277 and 0.231.0), so only the parent qualifies; anything further up
 # could be an unrelated agent.
 agent_pid() {  # <tool>
-  local comm
-  comm=$(ps -o comm= -p "$PPID" 2>/dev/null) && [[ "${comm##*/}" == "$1" ]] && echo "$PPID"
+  running "$1" "$PPID" && echo "$PPID"
   return 0
+}
+
+# Whether the agent still has its terminal. Hooks run without one, but the
+# agent keeps its own until the terminal is closed. Unknown, so false, when
+# the hook's parent is not the agent.
+agent_holds_terminal() {  # <tool>
+  local pid tty
+  pid=$(agent_pid "$1") && [[ -n "$pid" ]] || return 1
+  tty=$(ps -o tty= -p "$pid" 2>/dev/null) || return 1
+  tty=${tty//[[:space:]]/}
+  [[ -n "$tty" && "$tty" != *'?'* ]]
 }
 
 write_record() {  # <file> <json>
@@ -216,10 +199,17 @@ record_forget() {  # <tool> <id>
   valid_id "$2" && rm -f "$(record_file "$1" "$2")"
 }
 
-running() {  # <tool> <pid>
+running() {  # <tool> <pid>: whether that process is the tool
   [[ -n "$2" ]] || return 1
   local comm
   comm=$(ps -o comm= -p "$2" 2>/dev/null) && [[ "${comm##*/}" == "$1" ]]
+}
+
+# The name it was given since it started, else the one it started with.
+current_name() {  # <tool> <transcript> <name recorded at start>
+  local latest=""
+  [[ -f "$2" ]] && latest=$(adapter name "$1" "$2")
+  printf '%s' "${latest:-$3}"
 }
 
 # Emits one line per record, fields joined by $SEP:
@@ -238,7 +228,7 @@ load_records() {
     if [[ $(( $(now) - ${ended:-$started} )) -gt $PRUNE_AFTER ]]; then
       record_forget "$tool" "$id"; continue
     fi
-    if resumed "$tool" "$id"; then state=running
+    if adapter reopened "$tool" "$id"; then state=running
     elif [[ -n "$ended" ]]; then state=closed
     elif running "$tool" "$pid"; then state=running
     else state=lost
@@ -300,14 +290,16 @@ cmd_restore() {
     # Unnamed is no reason to lose work: name it by its id, and leave out
     # only the ones nothing happened in. The prompt below is the filter.
     if [[ -z "$name" ]]; then
-      if ! worked_in "$tool" "$transcript"; then
+      if [[ ! -f "$transcript" ]] || ! adapter answered "$tool" "$transcript"; then
         skipped+=("unnamed session in ${cwd/#$HOME/~}: nothing in it"); continue
       fi
       name="(unnamed ${id:0:8})"
     fi
     if [[ ! -d "$cwd" ]]; then skipped+=("$name: ${cwd/#$HOME/~} no longer exists"); continue; fi
-    if ! resumable "$tool" "$transcript"; then skipped+=("$name: nothing to resume (no transcript)"); continue; fi
-    if ! cmd=$(resume_command "$tool" "$id"); then skipped+=("$name: no resume command for $tool"); continue; fi
+    # Claude may never write a transcript for a session killed before its
+    # first exchange, and Droid deletes one nothing was said in.
+    if [[ ! -f "$transcript" ]]; then skipped+=("$name: nothing to resume (no transcript)"); continue; fi
+    if ! cmd=$(adapter resume "$tool" "$id"); then skipped+=("$name: no adapter for $tool"); continue; fi
     repo=$(git -C "$cwd" rev-parse --show-toplevel 2>/dev/null) || repo=$cwd
     plan+="$repo$SEP$started$SEP$name$SEP$cwd$SEP$cmd"$'\n'
   done < <(select_batch)
@@ -456,8 +448,8 @@ command -v jq >/dev/null || die "jq is required (brew install jq)"
 case "${1:-}" in
   track)
     [[ $# -eq 2 ]] || die "usage: agent-sessions track <tool>"
-    declare -F "track_$2" >/dev/null || die "no adapter for '$2'"
-    "track_$2"
+    declare -F "$2_track" >/dev/null || die "no adapter for '$2'"
+    "$2_track"
     ;;
   list) cmd_list ;;
   restore) shift; cmd_restore "$@" ;;
