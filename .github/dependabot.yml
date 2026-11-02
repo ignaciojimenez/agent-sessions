@@ -5,3 +5,6 @@ updates:
     directory: /
     schedule:
       interval: weekly
+    # Version updates wait 20 days after release; security updates are exempt.
+    cooldown:
+      default-days: 20
